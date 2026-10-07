@@ -38,13 +38,16 @@
 
 mod consts;
 mod dbus;
+mod gvariant;
 mod session;
 mod switcher;
+mod xkb_switcher;
 
 pub use consts::*;
 pub(crate) use dbus::*;
 pub(crate) use session::*;
 pub use switcher::*;
+pub use xkb_switcher::*;
 
 #[cfg(test)]
 mod tests;

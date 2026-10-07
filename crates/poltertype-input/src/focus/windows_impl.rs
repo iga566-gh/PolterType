@@ -149,6 +149,15 @@ impl FocusTracker for WindowsFocusTracker {
     }
 }
 
+/// `_caret_anchor` is honoured only on Linux — `GetGUIThreadInfo`
+/// costs one call to the foreground thread and changes nothing outside
+/// this process.
+pub(crate) fn create_windows_focus_tracker(
+    _caret_anchor: bool,
+) -> std::sync::Arc<dyn FocusTracker> {
+    std::sync::Arc::new(WindowsFocusTracker)
+}
+
 /// The window-relative hint for a caret already resolved to the screen
 /// point `origin`, whose client-space rectangle is `caret`, inside the
 /// foreground window `window`.

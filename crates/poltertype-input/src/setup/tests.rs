@@ -11,14 +11,35 @@ use super::*;
 
 #[test]
 fn the_probe_always_produces_something_renderable() {
-    let report = probe_setup();
+    let report = probe_setup("");
     for step in &report.steps {
-        assert!(!step.title.is_empty(), "a step with no title renders blank");
         assert!(
-            !step.detail.is_empty(),
-            "step `{}` has no explanation — the whole point of the pane",
-            step.title
+            !step.title.english.is_empty(),
+            "a step with no title renders blank"
         );
+        assert!(
+            !step.detail.english.is_empty(),
+            "step `{}` has no explanation — the whole point of the pane",
+            step.title.english
+        );
+    }
+}
+
+/// Two sentences under one key would translate to the same text, and
+/// the catalog would have no way to say the other one.
+#[test]
+fn every_sentence_has_its_own_key() {
+    let report = probe_setup("");
+    let mut seen = std::collections::BTreeSet::new();
+    for step in &report.steps {
+        for text in [&step.title, &step.detail] {
+            assert!(
+                text.key.starts_with("setup."),
+                "`{}` is outside the pane's namespace",
+                text.key
+            );
+            assert!(seen.insert(text.key), "`{}` is used twice", text.key);
+        }
     }
 }
 
@@ -27,7 +48,7 @@ fn the_probe_always_produces_something_renderable() {
 /// its "open the pane" button either way.
 #[test]
 fn every_actionable_step_says_what_to_do() {
-    for step in probe_setup().steps {
+    for step in probe_setup("").steps {
         if matches!(
             step.state,
             StepState::Todo | StepState::NeedsRelogin | StepState::NeedsReset
@@ -35,7 +56,7 @@ fn every_actionable_step_says_what_to_do() {
             assert!(
                 step.action.is_some(),
                 "step `{}` tells the user they must act and gives them no way to",
-                step.title
+                step.title.english
             );
         }
     }
@@ -43,7 +64,7 @@ fn every_actionable_step_says_what_to_do() {
 
 #[test]
 fn needs_attention_tracks_the_steps() {
-    let report = probe_setup();
+    let report = probe_setup("");
     let unresolved = report
         .steps
         .iter()

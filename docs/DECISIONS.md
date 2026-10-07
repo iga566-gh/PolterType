@@ -6,6 +6,518 @@ and any **alternatives** considered.
 
 ---
 
+## 2026-09-30 — A correction waits for held keys to come up, not for the gate to be smarter
+
+An automatic correction is triggered by the *press* of the boundary
+key, and the finger is still on it. On Linux the key gate then grabs
+the keyboard with `EVIOCGRAB`, and that key's release arrives during
+the grab — so the compositor, which saw the press, never sees the
+release. libinput keeps per-device key state and drops both a second
+press of a key it thinks is down and a release of one it never saw
+pressed (`src/evdev-fallback.c`, "Ignore key release events from the
+kernel for keys that libinput never got a pressed event for"). That second rule is why the emitter's release-before-press
+guard around the replayed boundary never worked: its release comes from
+our device, where the key was never down. The result is the space lost
+behind the corrected word and the user's next space lost too (#74).
+
+The absorb phase already waited for the fingers to settle — no new
+presses, modifiers up. It now also waits for every non-modifier key the
+engine saw go down to come up, inside the same 600 ms deadline, and on
+every platform rather than only where the gate runs: emitting a key
+while its physical twin is down is the same collision without a gate,
+only rarer.
+
+Rejected, with reasons:
+
+- **Write the swallowed release back to the device after the grab.**
+  evdev accepts writes, but an injected event reaches the other readers
+  only once the grab is gone — after the replay, so the replayed space
+  is still lost; only the stuck state after it would be fixed.
+- **Ungrab, write the release, re-grab, as soon as it is read.** Two
+  grab transitions cost 13–25 ms each, and a key pressed in between
+  would reach the application *and* be replayed by us.
+- **Double-tap the replayed boundary** (press, release, press,
+  release). Only correct while the physical key is still logically
+  down; otherwise it types two spaces, and that state is not ours to
+  read.
+- **Defer the grab per device until its keys are up.** The same wait,
+  moved into the device thread, where the engine's handshake would time
+  out and proceed unheld.
+
+The cost is latency only when the boundary is held longer than the
+absorb window already takes — a few tens of milliseconds on a long
+press. A key whose release never reaches us is ignored after two
+seconds, so it cannot turn every later correction into a 600 ms one.
+
+## 2026-09-25 — A word's layout is provisional only after the caret context broke
+
+Each word is stamped with the layout in effect at its first key, and
+both the manual hotkey and the automatic pass read the word under that
+stamp. The stamp exists for one case: the user switching layout by hand
+between the word and the key that closes it, where reading the word
+under the new layout would "correct" text that is already right.
+
+On a desktop that keeps a layout per window, that first reading can be
+wrong. The listener sees a key on the device before the compositor has
+finished the focus change in front of it, and the compositor answers
+with the previous window's layout until it has — about 70 ms after an
+`Alt+Tab` on Plasma 6 (issue #72). The hotkey then switched a word to
+the layout it was already in, and the automatic pass mistook the
+mismatch for a switch by hand.
+
+A word that starts after a click, a shortcut or a focus change —
+exactly the words the buffer already marks as starting unclean — now
+has its stamp read again on each of its keys for `FOCUS_SETTLE`, and at
+the hotkey or boundary if they fall inside it, through a
+`LayoutSwitcher::current_fresh` that goes past the 200 ms cache in
+front of the Linux backends and refreshes it.
+
+Rejected, with reasons:
+
+- **Stamp at every key, always.** The last key's layout would win, so
+  a switch by hand in mid-word would go unnoticed — the case the stamp
+  is for.
+- **Re-read the layout when the hotkey fires.** By then the user may
+  have switched by hand after the word, and the reading would be that
+  switch rather than the one the word was typed in.
+- **Follow the layout poller's change events.** They report the change
+  but not whether it preceded or followed a given key, and they cross a
+  thread into the engine for what a local re-read answers.
+- **Delay the first stamp by a fixed wait.** The engine thread would
+  sleep on every word, while the re-read costs nothing where the
+  context never broke.
+
+The window gives up a switch by hand made within half a second of a
+word's first key, and only when that word started after the context
+broke — a combination rare enough to lose.
+
+## 2026-09-19 — A library's dangling callback is dropped at our call site
+
+libayatana-appindicator's `unfallback` — the step that removes the
+legacy `GtkStatusIcon` once a real tray host appears — frees the icon
+and disconnects three of the four handlers it had connected to the
+indicator. The fourth writes the tooltip, and it keeps pointing at the
+freed object, so the next tooltip we set is a use-after-free (issue
+#73). It is upstream's bug, present in 0.6.0 and in master.
+
+We cannot wait for a fix: the library is whatever the user's distro
+ships, and the AppImage bundles one build of it for everybody. Of the
+ways to stop calling into a dangling handler, this one disconnects it
+from our side, immediately before each tooltip write.
+
+Rejected, with reasons:
+
+- **Vendor or patch the library.** It would fix the AppImage and
+  nothing else; distribution builds link the system copy. A fork is
+  also a permanent maintenance debt for one missing line.
+- **Turn the fallback off** by nulling the class's `fallback` hook.
+  Simplest of all, and it would end a second class of noise (on
+  Wayland the fallback icon is born defective and draws nothing). But
+  on X11 without a StatusNotifierWatcher — i3bar, trayer — that icon
+  is the only tray PolterType has, and this app is tray-only: no icon
+  means no interface at all.
+- **Stop writing tooltips after the first fallback.** Gives up a
+  feature on every affected session to avoid a bug on some of them.
+- **Track the fallback ourselves** from the `connection-changed`
+  signal. Needs a callback, an idle source and a piece of state that
+  has to stay true to the library's internals anyway.
+
+What makes the drop safe is a liveness test rather than remembered
+state: `new-icon` is connected and disconnected by the same pair of
+functions as the tooltip handler, and only ever beside an icon that
+exists. A `new-tooltip` handler with no `new-icon` handler next to it
+is therefore the leak and nothing else — so a fallback that is still on
+screen keeps its hover text, and a second fallback cycle is handled
+without bookkeeping. If upstream ever fixes `unfallback`, the test
+simply never fires.
+
+## 2026-09-17 — A suppression window stops the automatic pass, never the stash
+
+Twice now the same shape has shipped: something switches auto-switching
+off for a while, and the manual switch-last hotkey goes off with it.
+Pause did it (#36), and the paste guard did it again (#72) — both by
+returning *above* the line that writes the last word to the stash,
+rather than below it.
+
+The two are not the same decision and must not share a gate. The
+automatic pass is us acting unasked, so every doubt argues for silence:
+a word that may be pasted text replayed as keystrokes must not be
+retyped. The stash is only a record of what was typed, and the hotkey
+that reads it is the user asking, in so many words, for the thing the
+automatic pass declined to do. Suppressing it is not caution, it is
+taking away the remedy for the caution — and it does so in the second
+right after a paste, which is a second in which people type.
+
+**So: the stash is written first, and every "do not correct this"
+gate lives below it.** The paste guard moved down beside the pause
+gate, which already carried this reasoning in a comment. A regression
+test pins each half — that the hotkey still reaches a word finished
+inside the window, and that the window still keeps the automatic pass
+quiet.
+
+Alternative considered: making the guard smarter — distinguishing a
+replayed paste from a person by inter-key timing. Rejected. It is a
+guess about someone else's virtual keyboard, it would fail on the
+machines the guard exists for, and it solves a problem this does not
+have: the guard's suppression was never wrong, only its reach.
+
+## 2026-09-10 — A backend that cannot answer is asked once
+
+Before typing anything, a correction re-reads the layout three times
+across 80 ms and treats any single "no" as a no. That exists because
+MATE's settings daemon lets an `XkbLatchLockState` land and restores
+its own group milliseconds later, and going ahead then deletes the
+user's word and retypes it identically (2026-08-24, above).
+
+But `verify_switched` has three answers, and the third is `None` —
+"this backend has no reading independent of its own write". KDE,
+Hyprland, IBus and Fcitx all answer that, and sampling silence three
+times says nothing that sampling it once did not. Those two sleeps sat
+in front of every manual switch on all of them: measured on Hyprland,
+80 ms of a 172 ms wait (issue #71).
+
+**`None` now returns at once.** `Some(true)` is still sampled across
+the whole window, so MATE's protection is untouched, and the test that
+pins it asserts the *number* of readings rather than a duration —
+one for a blind backend, three for a seeing one.
+
+Alternative considered: dropping the sampling to one probe everywhere
+and re-reading after the deletion instead. Rejected — after the
+deletion the word is already gone, which is the outcome the guard
+exists to prevent.
+
+---
+
+## 2026-09-10 — One gear for the whole correction, and why a settle cannot reach zero
+
+`replay_speed` shipped in 0.35.0 scaling the emitter's inter-key
+pacing. The next report (issue #71) was about the other half of the
+same wait: the reporter measured 0.3–0.5 s between releasing the
+manual-switch hotkey and seeing the word change, and asked to
+customise that too. Measured on Hyprland with keyd, a six-letter word
+at the default setting spent 60 ms watching the key stream settle,
+80 ms re-reading a layout nobody could read back, and 184 ms emitting.
+
+**The setting now scales the engine's settle windows as well** — the
+xkb-propagation floor and the gap between the settle probes — through
+`ReplaySpeed::settle`, which is deliberately *not* `pace`:
+
+| | `normal` | `fast` | `instant` |
+|---|---|---|---|
+| `pace` (a device we own) | full | half | **zero** |
+| `settle` (another process's clock) | full | half | **a quarter** |
+
+A pace can vanish because what it protects against — a remapper
+coalescing two edges microseconds apart — is guarded at the boundary
+key by waits that never scale. A settle cannot: it waits for a
+compositor to propagate xkb state and for a settings daemon to stop
+disagreeing, and arriving early there does not lose a keystroke, it
+retypes the whole word in the layout we just left. A quarter of a
+measured window is still a floor; zero is a guess.
+
+**Both halves are read live.** The engine re-reads the setting per
+correction, and a running emitter holds it in an atomic that
+`set_replay_speed` writes when `config.toml` changes — so the setting
+applies to the next correction rather than the next start, which is
+what #67's reporter asked for after using it.
+
+Measured end to end on this machine, from the trigger key rising, read
+off PolterType's own virtual keyboard: first key **70 / 40 / 25 ms**,
+whole burst **217 / 144 / 82 ms**. Before any of this: 172 and 320.
+
+---
+
+## 2026-09-10 — The tray tooltip is a name and a state, not one line
+
+`app_indicator_set_tooltip_full` takes an icon name, a title and a
+body, and the StatusNotifierItem `ToolTip` property carries all three.
+0.35.0 put the whole hover text in the title and sent a null body,
+because the title was the part we could prove a panel draws.
+
+It draws both, and it styles them differently — the reporter of issue
+#59 sent a screenshot of the result once the tooltip finally appeared
+on Debian 13: `PolterType — en-US` as one bold run, next to another
+app's name-over-description. So the split is now ours to make rather
+than the panel's to guess: the product name is the title, everything
+that changes — layout, paused, missing keyboard access, drafts waiting
+— is the body, and an empty body still goes out as null so a host is
+free to draw the title alone.
+
+Windows and macOS take one string. They join the two back with the
+same em dash they always showed, in one function, so the platform with
+two fields is the one that carries the seam.
+
+---
+
+## 2026-09-09 — A popup belongs to a monitor, not to the root window
+
+X11 root coordinates cover the whole desktop, so the fallback
+placement — bottom centre, used whenever nothing tells us where the
+caret is — centred the tooltip in the *union* of the monitors. On one
+screen that is the middle of the screen; on two it is the seam, and the
+popup was drawn half on each (issue #70, GNOME Wayland, where Mutter
+offers no layer shell and the X11 override-redirect backend is the only
+one available).
+
+**The X11 backend now asks RandR for the physical rectangles and
+measures inside one of them.** Which one comes from the anchor itself
+where the anchor knows — the caret's point, the focused window's
+centre — and otherwise from the server: the focused X window first,
+the pointer if no X client holds focus, which under XWayland is every
+native Wayland window. The clamp that used to keep the popup on the
+root now keeps it on that monitor, so a caret beside the seam no longer
+pushes half the tooltip onto the neighbouring screen either.
+
+**Asked per show, not cached.** A cached monitor list is correct until
+somebody replugs a screen and wrong from then on, with nothing to say
+so; the query is three round trips at most, on the popup's own thread,
+and only while a popup is being shown. A server with no RandR 1.5, or
+one that answers nothing, falls back to the whole root — which is
+exactly the behaviour being replaced, so the worst case is today's.
+
+**Wayland needs none of this**: a layer surface is anchored to an
+output by the compositor, which knows better than we do which one the
+user is looking at.
+
+---
+
+## 2026-09-09 — The replay's pacing is the user's to spend
+
+A correction types itself out with a pause between key events: 4 ms on
+evdev, 2 ms on X11. The reason is not politeness — an input remapper
+proxying our virtual keyboard (keyd and everything shaped like it)
+coalesces or drops press/release pairs that land microseconds apart,
+and the user loses a letter, most visibly the trailing space. But it is
+also most of what a correction spends: on a six-letter word the pacing
+is around 150 ms of the ~180 ms burst, and PuntoSwitcher on Windows —
+where `SendInput` takes a whole burst in one call — is visibly quicker
+(issue #67).
+
+**Exposed as `[engine].replay_speed`: `normal`, `fast`, `instant`.**
+Normal is the measured pacing and stays the default, because the
+failure it prevents is silent and looks like our bug. The other two
+halve it and remove it, and the Settings hint says what to watch for —
+if letters start going missing, go back.
+
+**Only the pacing scales.** The guards around the boundary key — the
+release before a press the user is probably still holding, and the hold
+after it — are correctness, not speed, and they stay as measured at
+every setting. Same for the layout settle and the intrusion probes,
+which are about races with the user rather than about typing quickly.
+
+**Widened 2026-09-10 (issue #71):** the settle windows *do* scale now,
+by a gentler rule that cannot reach zero — see that day's entry. The
+boundary guards and the intrusion probes still do not.
+
+**Linux only in effect.** Windows has no clock pause to give up, and
+macOS paces its backspaces against the window server's own echo, which
+is a measurement rather than a constant. The setting is honest about
+that in its doc comment instead of pretending to be cross-platform.
+
+---
+
+## 2026-09-09 — The AppImage carries its own tray library
+
+The tray tooltip has existed in our code since 0.32.0 and reached
+almost nobody. `app_indicator_set_tooltip_full` arrived in
+libayatana-appindicator 0.6.0; Debian 13, Debian sid and every current
+Ubuntu ship 0.5.9x, where the symbol does not exist — and the AppImage
+made it worse, because it bundles the library from the machine that
+built it (an Ubuntu runner) and that copy wins over whatever the user
+has installed. So the one build most people download was guaranteed to
+have no hover text (issue #59, reopened by the reporter after 0.32.1
+changed nothing for them).
+
+**The AppImage build now builds 0.6.0 from source and bundles that**,
+when — and only when — the system copy lacks the symbol. Distribution
+packages are unaffected: on Arch, and on anything else already at
+0.6.0, nothing changes.
+
+**Only the shared library target is built**, not the project's default
+one. The full build generates GObject-introspection data, which needs a
+scanner toolchain, produces a `.gir` and a `.typelib` no AppImage ever
+reads, and failed on the runner image for exactly that reason.
+
+**It fails the build rather than falling back.** An AppImage that
+quietly ships without the tooltip is the shape of the original bug, and
+the script now asserts the symbol twice: on the library it picked, and
+on the copy linuxdeploy actually deployed.
+
+---
+
+## 2026-09-08 — Joining the accessibility bus is a choice, not a side effect
+
+PolterType connects to AT-SPI for one thing: where the text caret is,
+so the suggestion tooltip can sit next to it. Connecting also raises
+`org.a11y.Status.IsEnabled` for the whole session — deliberately, since
+toolkits keep their bridges dormant until an assistive client asks. The
+part nobody weighed is that other applications read that flag: Qt
+switches its accessibility bridge on, and Telegram Desktop tells the
+user a screen reader is running. Every session, whether or not a single
+suggestion was ever shown (issue #66).
+
+**Gated behind `[suggestions] caret_anchor`, and behind
+`[suggestions] enabled` as well.** The tooltip is the only consumer of
+a caret in the whole program, so with suggestions off the watcher was
+pure cost — that half needed no new setting at all, only the question
+being asked.
+
+**The default stays on.** Off by default would trade a visible feature
+(the tooltip appearing where the user is typing) for a banner in one
+application, for everybody, including the majority who never see the
+banner. The people affected get a switch and a sentence in
+`docs/PERMISSIONS.md` saying what it does; that is the right shape for
+a trade-off that is genuinely a matter of taste.
+
+**On GNOME and KDE Wayland the connection stays regardless**, because
+the same bus is the only answer to "which application has focus" —
+`[exceptions]` has no other source there. Turning the caret off saves
+the subscription, not the connection, and the setting's doc comment
+says so rather than promising a silence it cannot deliver.
+
+**Alternatives.** Connecting lazily on the first tooltip only delays
+the banner to the first suggestion, which is no answer for someone who
+does not want it at all. Reading the caret from the compositor instead
+is not on offer: no Wayland protocol exposes another application's
+caret, which is the whole reason AT-SPI is in this code.
+
+---
+
+## 2026-09-07 — The input thread waits for the kernel instead of asking it
+
+Both Linux listeners ran on a timer. The evdev one asked every open
+keyboard whether it had anything, found nothing, slept 2 ms and asked
+again; the X11 one did the same to the connection. Five hundred rounds
+a second on an idle keyboard is about half a percent of a core, forever
+— and on a laptop the cost is not the half percent but the idle states
+it keeps the CPU out of (issue #63).
+
+**Both now wait on the descriptors they were asking about**, with
+`poll(2)` — the devices themselves on evdev, the connection socket on
+X11. An idle keyboard costs nothing at all, and a keystroke arrives
+when the kernel has it rather than up to a sleep later.
+
+**The key gate gets an `eventfd`, because a wait it cannot interrupt is
+a wait that outlives its usefulness.** A correction asks for the
+keyboard to be held and gives the device thread `HOLD_HANDSHAKE` (40 ms)
+to take the grabs; a hold not taken in time proceeds unheld, which is
+the failure this whole mechanism exists to prevent. Hold, release and
+shutdown therefore write to a descriptor the wait is watching, so the
+thread is serviced in microseconds rather than whenever its timeout
+runs out. Where the kernel refuses an eventfd the wait falls back to a
+2 ms cap — the cadence the loop had before, so the fallback is the
+behaviour that has been shipping rather than a new one.
+
+**What had to move with it.** The Caps Lock latch is now read at the
+*top* of the loop rather than after the batch, and the X11 modifier
+reconciliation likewise. A thread that sleeps between keystrokes has to
+reconcile on the way in: a latch changed with no key event — KDE
+InputActions, `xdotool key Caps_Lock`, an on-screen keyboard — used to
+be caught by the next of the five reads a second, and would otherwise
+now be caught only after the first word had been typed through it.
+
+**Alternatives.** A longer sleep is still a timer, and it buys the CPU
+back by spending hold latency, which is the wrong currency. `epoll` has
+nothing to offer over `poll` at a dozen descriptors re-polled on every
+rescan. `libinput` would replace the loop entirely, at the price of a
+dependency, a different permission model and a rewrite of the grab
+handling that took three releases to get right.
+
+---
+
+## 2026-09-07 — A catalog says which language a guide is in, not where it is
+
+The Setup pane opens `docs/PERMISSIONS.md` — in English, from a window
+that may be in four other languages, with nothing in the program able
+to point that button anywhere else (issue #61).
+
+**The catalog carries the answer, because nothing here may ask the
+network.** Whether `PERMISSIONS.uk.md` exists is a fact about the
+repository, and the only way to establish it at click time is an HTTP
+request. PolterType makes exactly one network call and it is the
+updater; a second one, on a button press, to learn something the
+contributor already knew when they wrote the file, is not a trade
+worth making. So the catalog that translates the window carries the
+claim as well — `"docs.permissions" = "uk"` — and the pull request
+that adds the page adds the line.
+
+**A language tag, not an address.** The value could have been the
+whole URL, which would also let a translator host their page
+elsewhere. It is a tag instead: prefix, file and suffix are assembled
+in the program, and a value that is not a tag is ignored. A catalog is
+a file that can arrive from the user's config directory, and the worst
+thing a translation file should be able to do is be wrong about its
+own language — not aim a button in our window at a site of its
+choosing. Plug-in catalogs cannot reach the key at all; they are
+confined to `plugin.<id>.`.
+
+**The swap happens where the link is opened**, not at each button. Two
+of the doc buttons on that pane get their URL from `poltertype-input`,
+the crate that holds per-OS code and therefore cannot call `tr` — the
+wall issue #60 ran into a release earlier. One function on the way to
+`opener` covers every guide the window opens, including the ones built
+where a translation lookup is out of reach.
+
+Alternatives considered: probing for the file (the network call
+above); one language suffix shared by every guide (a translator who
+does one page and not another would send readers to a 404); a table in
+the program of which languages each guide exists in (a code change for
+something that is not code, and out of reach of a catalog a user wrote
+for themselves).
+
+---
+
+## 2026-09-02 — `tray_icon = "flag"`, drawn rather than shipped
+
+A fourth value for the one `tray_icon` key: the layout's country flag
+instead of its two letters. The letters are a code the user has to
+read; a flag is recognised before it is read, which is the whole point
+of a 16-pixel badge in a panel.
+
+**Drawn procedurally, like the app icon.** No PNG set, no emoji font,
+no image crate: each flag is a function of one point on a 56×40 box —
+bands, a cross, a disc, an even-odd polygon test for Turkey's star and
+Israel's hexagram — rendered by the same arithmetic that already draws
+the lettered badge. Shipping ~40 flag images would put the repository's
+first binary assets in it (see 2026-08-15) and cost more bytes than the
+whole icon module; rendering through a colour-emoji font would need a
+font stack the tray path deliberately does not have.
+
+**The flag comes from the region subtag, never from the language.** A
+flag stands for a country, and `en-GB` and `en-US` are one language
+under two of them. `region_of` reads the last two-letter uppercase
+subtag, so `kk-Cyrl-KZ` is Kazakhstan and `es-419` — half a continent —
+is nothing.
+
+**A country with no drawing keeps the letters.** Nothing about asking
+for flags was a request to stop saying which layout is in force, so
+`flag` falls back to the `color` badge rather than to a blank or a
+placeholder. That fallback is what makes the next rule affordable.
+
+**Only flags that can be told apart at 16 pixels are in the table.**
+Slovakia, Slovenia, Serbia and Croatia are white-blue-red bands plus an
+emblem no 40-pixel drawing carries, and Mexico is Italy plus one: drawn
+as bands they would each be a confident lie about the layout in force.
+They are absent, and their layouts wear `SK`, `SI`, `RS`, `HR`. The
+emblems that *are* drawn are simplified to what survives the size —
+twenty stars rather than fifty, a straight line where the taegeuk
+curves — and a test asserts no two drawings in the table are the same
+buffer, so a copy-paste cannot quietly make two countries one.
+
+**Paused dims the flag instead of greying it flat.** The `color` badge
+turns one uniform grey and keeps its letters; a flag greyed to one tone
+keeps nothing. The flag is flattened into a dark grey *band* instead,
+so the bands, the cross or the disc still name the country while the
+icon plainly reads as inactive.
+
+**An edge, one design unit thick, drawn beside the flag rather than
+over it.** Half these flags end in white and several end in black, and
+a panel of that colour swallows that side. The edge takes the panel's
+polarity like the `mono` letters do — and, like them, that polarity is
+a guess a panel is free to disagree with.
+
+---
+
 ## 2026-08-30 — The force-switch falls back to one separator
 
 The whole engine is built around words: the buffer collects letters,
@@ -4222,3 +4734,119 @@ cross-layout twin *is* a real word is a permanent veto on correcting
 that word, which is the same failure as a poisoned overlay arriving by
 a respectable route. `src` (uk-UA `ікс`), `cfg` (`сап`) and `ptr`
 (`зек`) failed that check and were left out.
+
+## 2026-09-04 — A language that changes while the app runs, so the catalog is swapped rather than re-read
+
+`tr(key, english)` returns `&'static str`. That is what lets the view
+function do several hundred lookups a frame and allocate nothing, and
+it is also what made the catalog a `OnceLock`: a string handed out has
+to stay valid for as long as any widget might still be holding it, and
+writing the map once and never touching it again is the cheapest way to
+promise that.
+
+The bill arrived when the language became something a user picks. The
+window only spoke the new language after it was closed and reopened —
+it is a subprocess, so a new one read a new catalog — and the tray,
+which outlives every window, never spoke it at all: its menu had been
+built from the words the process started with, so Save, Reload and
+closing the window all left it exactly as it was.
+
+Three ways out.
+
+**Return an owned string.** `tr` allocates per call, at 250 call sites,
+on every frame. The signature that keeps the view function free stops
+being free, and for a value that changes a handful of times in a
+session's life.
+
+**Reference-count it.** `Arc<Catalog>` behind an `ArcSwap`, with `tr`
+returning a guard instead of a `&'static str`. Correct, bounded, and it
+rewrites every call site — a translated label could no longer be handed
+straight to a widget constructor.
+
+**Leak it and swap the pointer.** The strings stay `'static` because
+nothing is ever freed; `tr` keeps both its signature and its cost, an
+uncontended read lock around the same hash lookup. What is paid is
+memory: one catalog per language that actually changed, tens of
+kilobytes each, never given back.
+
+We took the leak. The bound is what a person does, not what a loop
+does: picking every shipped language and coming back holds five
+catalogs. `reload` compares the fresh catalog against the live one and
+swaps only on a difference, so a settings change that touched something
+else costs nothing at all.
+
+Two consequences worth writing down. The tray's entries are now created
+wordless and written by a single function, because the words then exist
+in exactly one place — and that place is what a language change calls
+again; a second copy in the construction path is a copy that drifts.
+And reading the files again, rather than only re-resolving the locale,
+makes this the translator's loop as well: edit a catalog, press Reload,
+see it.
+
+What is deliberately left behind: a plug-in's tray entries, built from
+its manifest when it is discovered, and the `POLTERTYPE_LOCALE` its
+process was handed when it was spawned. Both would mean rebuilding a
+menu whose ids the event loop already holds, or restarting somebody
+else's program because a label changed. They take the new language at
+the next start, and `docs/KNOWN-GAPS.md` says so.
+
+---
+
+## 2026-09-05 — The Linux tray is ours, because a tooltip has to come from somewhere
+
+`tray-icon` has been the tray on all three platforms since the first
+release, and on two of them it still is. On Linux it no longer builds
+the icon: `poltertype-tray` creates the `AppIndicator` itself.
+
+The reason is one empty function. `TrayIcon::set_tooltip` on Linux
+takes the text, ignores it and returns `Ok(())` — documented as
+"Linux: Unsupported", and still that in 0.24.2, five versions ahead of
+the one we pin. So every state change PolterType made — a layout
+switch, a pause, a draft arriving — wrote a tooltip that went nowhere,
+until somebody asked why the icon had no hover text
+([#59](https://github.com/Just-Code-NET/PolterType/issues/59)). It
+never had one.
+
+The library underneath is not the problem. libayatana-appindicator
+implements `app_indicator_set_tooltip_full`, and the
+StatusNotifierItem `ToolTip` property it fills is what a host draws on
+hover — Plasma's own delegate binds its tooltip to `ToolTipTitle` and
+falls back to nothing, while `Title`, the one property we were setting
+by accident, is only the label in its hidden-items list. Reaching that
+function needs the `AppIndicator` pointer, and `tray-icon` keeps it
+private: no accessor, no extension trait, nothing to ask.
+
+Three ways to that pointer.
+
+**Fork `tray-icon`.** Fifteen lines and upstreamable — and a
+source-controlled dependency in a shipped product for as long as it
+takes to land, which every packager and everyone building from source
+inherits.
+
+**Wait for upstream.** The function has been empty for as long as the
+crate has existed, and the reporter is on the current release.
+
+**Create the indicator ourselves.** Two hundred lines in the crate that
+exists for exactly this class of problem, against the library the
+process already loads, with nothing off crates.io.
+
+We took the third. What keeps it a small change rather than a rewrite
+is that the menu never moved: `tray_icon::menu` is `muda` re-exported,
+the binary still builds its menu out of it, and the indicator is handed
+the same `gtk::Menu` `tray-icon` would have handed it. Ours now are the
+icon file, the status and the tooltip — and the icon path is a
+transcription of that backend, the same calls in the same order, so
+that a desktop it already worked on cannot tell the difference.
+
+Two things changed on purpose. The item's id is `poltertype` rather
+than the `tray-icon tray app` that every application built on that
+crate shares, and its `Title` is `PolterType` rather than the
+lower-cased process name a host was falling back to. A panel that
+remembers per-item whether it was shown may treat ours as a new item
+once, which is the price of no longer answering to a name that was
+never about us.
+
+One thing degrades instead of failing. The tooltip symbol is looked up
+by name, once, at construction: a system carrying the pre-Ayatana
+`libappindicator3`, which has no tooltip API at all, gets the tray it
+had before and a debug line saying why.

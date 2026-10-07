@@ -1,4 +1,5 @@
-//! Windows global keyboard listener via `WH_KEYBOARD_LL`.
+//! Windows global keyboard listener via `WH_KEYBOARD_LL`, with a
+//! `WH_MOUSE_LL` beside it that reports clicks as the pointer marker.
 //!
 //! The hook callback runs on the OS-owned hook thread; we pump it via a
 //! dedicated thread that owns the message loop. The callback itself
@@ -8,26 +9,26 @@
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 use std::sync::Arc;
 
 use crossbeam_channel::Sender;
+use poltertype_types::SC_POINTER_BUTTON;
 use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::{HMODULE, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyState, VK_CAPITAL, VK_CONTROL, VK_LMENU, VK_LWIN, VK_MENU, VK_RMENU,
-    VK_RWIN, VK_SHIFT,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    MSLLHOOKSTRUCT, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use super::consts::EMITTER_MARKER;
 use super::gate::WindowsGate;
-use crate::{InputError, InputListener, KeyDirection, KeyEvent, Modifiers};
+use super::modifiers::{modifiers_for_event, read_modifiers};
+use super::pointer::pointer_button;
+use super::types::WorkerHandle;
+use crate::{InputError, InputListener, KeyDirection, KeyEvent};
 
 /// Sender shared with the C-callable hook procedure. There can only be
 /// one global keyboard hook per process at a time. `parking_lot::RwLock`
@@ -51,12 +52,6 @@ fn sink_slot() -> &'static parking_lot::RwLock<Option<Sender<KeyEvent>>> {
 pub struct WindowsListener {
     worker: Option<WorkerHandle>,
     gate: Option<Arc<WindowsGate>>,
-}
-
-struct WorkerHandle {
-    join: JoinHandle<()>,
-    thread_id: u32,
-    stopping: std::sync::Arc<AtomicBool>,
 }
 
 impl WindowsListener {
@@ -166,6 +161,34 @@ fn run_hook_thread(tid_tx: Sender<u32>, _stopping: std::sync::Arc<AtomicBool>) {
         }
     };
 
+    // The pointer half, on the same thread and message loop. A click is
+    // how a Windows user mostly moves the caret, and without it the
+    // engine went on believing the caret sat after the last word: the
+    // hotkey switched that word over whatever had been selected since.
+    // Optional — a machine that refuses this hook keeps the keyboard.
+    // Safety: as above, WH_MOUSE_LL takes NULL hMod for an in-process
+    // global hook.
+    let mouse_hook = match unsafe {
+        SetWindowsHookExW(
+            WH_MOUSE_LL,
+            Some(low_level_mouse_proc),
+            HMODULE(std::ptr::null_mut()),
+            0,
+        )
+    } {
+        Ok(h) => {
+            info!("Windows LL mouse hook installed");
+            Some(h)
+        }
+        Err(e) => {
+            warn!(
+                ?e,
+                "SetWindowsHookExW(WH_MOUSE_LL) failed; a click will not end the word being typed"
+            );
+            None
+        }
+    };
+
     let mut msg = MSG::default();
     loop {
         // Safety: standard Win32 message pump. GetMessageW blocks the
@@ -180,10 +203,51 @@ fn run_hook_thread(tid_tx: Sender<u32>, _stopping: std::sync::Arc<AtomicBool>) {
         }
     }
 
-    // Safety: hook handle was returned by SetWindowsHookExW.
+    // Safety: hook handles were returned by SetWindowsHookExW.
     unsafe {
         let _ = UnhookWindowsHookEx(hook);
+        if let Some(mouse_hook) = mouse_hook {
+            let _ = UnhookWindowsHookEx(mouse_hook);
+        }
     }
+}
+
+/// Report a button press as the pointer marker — the same pseudo-key
+/// the macOS, X11 and evdev listeners send, so the engine ends the word
+/// and drops the stash on a click here too.
+///
+/// Every mouse move passes through this, so it does the minimum: one
+/// match on the message, and for a press a modifier read and a
+/// `try_send`. Never swallows: the gate holds keys, not the mouse.
+unsafe extern "system" fn low_level_mouse_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        // Safety: by Win32 contract, lparam points to a MSLLHOOKSTRUCT.
+        let ms = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        if let Some(button) = pointer_button(wparam.0 as u32, ms.mouseData) {
+            let event = KeyEvent {
+                vk: button,
+                scancode: SC_POINTER_BUTTON,
+                direction: KeyDirection::Press,
+                modifiers: read_modifiers(),
+                injected: ms.dwExtraInfo == EMITTER_MARKER,
+                timestamp_ms: ms.time as u64,
+            };
+            if let Some(slot) = EVENT_SINK.get() {
+                if let Some(sink) = slot.read().as_ref() {
+                    if let Err(err) = sink.try_send(event) {
+                        debug!(?err, "dropping pointer event (sink full or closed)");
+                    }
+                }
+            }
+        }
+    }
+
+    // Safety: pass through to the next hook in the chain, as above.
+    unsafe { CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam) }
 }
 
 unsafe extern "system" fn low_level_keyboard_proc(
@@ -216,7 +280,7 @@ unsafe extern "system" fn low_level_keyboard_proc(
                 vk: kb.vkCode,
                 scancode: kb.scanCode,
                 direction,
-                modifiers: read_modifiers(),
+                modifiers: modifiers_for_event(kb.vkCode, direction),
                 injected: ours,
                 timestamp_ms: kb.time as u64,
             };
@@ -250,22 +314,4 @@ unsafe extern "system" fn low_level_keyboard_proc(
     // arg is the hook handle; passing a default works per docs (it is
     // ignored for WH_KEYBOARD_LL since Win XP, but we still must call).
     unsafe { CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam) }
-}
-
-fn read_modifiers() -> Modifiers {
-    fn down(vk: u16) -> bool {
-        // Safety: GetAsyncKeyState is a trivial Win32 call.
-        unsafe { (GetAsyncKeyState(vk as i32) as u16) & 0x8000 != 0 }
-    }
-    // The low bit of `GetKeyState` is the toggle, not the held-ness —
-    // the only thing that answers "is Caps Lock on" without guessing.
-    // Safety: GetKeyState is a trivial Win32 call.
-    let caps = unsafe { GetKeyState(VK_CAPITAL.0 as i32) } & 1 != 0;
-    Modifiers {
-        shift: down(VK_SHIFT.0),
-        control: down(VK_CONTROL.0),
-        alt: down(VK_MENU.0) || down(VK_LMENU.0) || down(VK_RMENU.0),
-        meta: down(VK_LWIN.0) || down(VK_RWIN.0),
-        caps,
-    }
 }

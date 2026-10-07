@@ -22,15 +22,11 @@ use std::path::{Path, PathBuf};
 
 use tracing::{debug, warn};
 
-use super::consts::{MANIFEST_NAME, PLUGINS_DIR};
+use super::consts::{EXTENSION_BIN_DIR, MANIFEST_NAME, PLUGIN_PATH_VAR, PLUGINS_DIR};
 use super::enums::{PluginError, PluginKind};
 use super::install::read_header;
 use super::types::ExtensionManifest;
-use super::validate::{EXTENSION_BIN_DIR, check_extension};
-
-/// Environment variable holding extra plug-in directories, separated
-/// the way `PATH` is on this platform.
-pub const PLUGIN_PATH_VAR: &str = "POLTERTYPE_PLUGIN_PATH";
+use super::validate::check_extension;
 
 /// An extension that was found, checked, and can be run.
 #[derive(Debug, Clone)]
@@ -168,6 +164,16 @@ pub fn resolve_exe(dir: &Path, name: &str) -> Option<PathBuf> {
     built.into_iter().next().map(|(_, p)| p)
 }
 
+/// Every directory a plug-in may be loaded from, installed ones first
+/// — the same three sources [`extensions`] walks, for callers that want
+/// what a plug-in *carries* rather than the program it runs.
+pub fn plugin_dirs(data_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = installed_dirs(data_dir);
+    dirs.extend(path_dirs());
+    dirs.extend(sibling_dirs());
+    dirs
+}
+
 fn installed_dirs(data_dir: &Path) -> Vec<PathBuf> {
     let plugins = data_dir.join(PLUGINS_DIR);
     let Ok(entries) = std::fs::read_dir(&plugins) else {
@@ -218,5 +224,4 @@ fn sibling_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
-#[path = "discover_tests.rs"]
 mod tests;

@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use iced::widget::text_editor;
 use poltertype_core::engine::{ModRole, ModSet};
+use poltertype_core::i18n::tr;
 use poltertype_core::plugins::SettingValue;
 use poltertype_core::settings::TrayIconStyle;
+use poltertype_input::ReplaySpeed;
 use poltertype_layout::LayoutId;
 
 use super::plugin_pane::Slot;
@@ -41,17 +43,25 @@ pub enum CommandActionKind {
 impl CommandActionKind {
     pub(super) fn label(self) -> &'static str {
         match self {
-            CommandActionKind::TypeText => "Type text (snippet)",
-            CommandActionKind::SwitchLayout => "Switch layout",
-            CommandActionKind::OpenPath => "Open file / URL",
+            CommandActionKind::TypeText => tr("commands.action_type", "Type text (snippet)"),
+            CommandActionKind::SwitchLayout => tr("commands.action_switch", "Switch layout"),
+            CommandActionKind::OpenPath => tr("commands.action_open", "Open file / URL"),
         }
     }
 
+    /// The greyed example under the parameter box.
+    ///
+    /// The snippet one is deliberately a single line: nothing between
+    /// this box and the keystrokes expands `\n`, so an example
+    /// containing one promises an escape the engine does not have.
     pub(super) fn placeholder(self) -> &'static str {
         match self {
-            CommandActionKind::TypeText => "Best regards,\\nDmytro",
-            CommandActionKind::SwitchLayout => "en-US",
-            CommandActionKind::OpenPath => "https://… or C:\\path\\to\\file.md",
+            CommandActionKind::TypeText => tr("commands.placeholder_text", "Best regards, Dmytro"),
+            CommandActionKind::SwitchLayout => tr("commands.placeholder_layout", "en-US"),
+            CommandActionKind::OpenPath => tr(
+                "commands.placeholder_path",
+                "https://… or C:\\path\\to\\file.md",
+            ),
         }
     }
 }
@@ -79,8 +89,8 @@ impl WordlistKind {
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            WordlistKind::Extras => "Extras (full words)",
-            WordlistKind::Stop => "Stop list (short tokens)",
+            WordlistKind::Extras => tr("wordlists.kind_extras", "Extras (full words)"),
+            WordlistKind::Stop => tr("wordlists.kind_stop", "Stop list (short tokens)"),
         }
     }
 }
@@ -131,9 +141,9 @@ impl ThemeChoice {
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            ThemeChoice::System => "System",
-            ThemeChoice::Light => "Light",
-            ThemeChoice::Dark => "Dark",
+            ThemeChoice::System => tr("general.theme_system", "System"),
+            ThemeChoice::Light => tr("general.theme_light", "Light"),
+            ThemeChoice::Dark => tr("general.theme_dark", "Dark"),
         }
     }
 }
@@ -179,6 +189,14 @@ pub enum Message {
     PluginOpenLink(String),
     /// Runs one of the plug-in's declared commands by id.
     PluginCommandClicked(usize, String),
+    /// A question being typed into a plug-in's query box. Kept in the
+    /// pane and never written to the plug-in's config: it is a question,
+    /// not a setting.
+    PluginQueryTyped(usize, usize, String),
+    /// That question, asked. The answer arrives as
+    /// [`Self::PluginOutputLoaded`] and is drawn where a report's would
+    /// be — one box, one command, one answer.
+    PluginQueryAsked(usize, usize),
     /// Ask a plug-in to run a control's command again — the pane's
     /// refresh button, and what opening the pane sends for each
     /// command-backed control it has not asked for yet.
@@ -268,6 +286,7 @@ pub enum Message {
     // ── Suggestions pane ───────────────────────────────────────────
     /// `[suggestions].enabled` — master switch for the typo tooltip.
     SuggestionsToggled(bool),
+    SuggestionCaretAnchorToggled(bool),
     /// `[suggestions].max_suggestions`, stepped by the ± buttons.
     SuggestionMaxDelta(i64),
     /// `[suggestions].tooltip_timeout_secs`, stepped by the ± buttons.
@@ -284,6 +303,15 @@ pub enum Message {
     /// Segmented tray-icon picker beside it. Nothing to apply here —
     /// the tray is another process, and it re-reads `config.toml`.
     TrayIconChoiceChanged(TrayIconStyle),
+
+    /// Segmented replay-speed picker on the General pane. Takes
+    /// effect when the app next builds its emitter, i.e. on restart.
+    ReplaySpeedChanged(ReplaySpeed),
+
+    /// The interface language, as a locale code (`"system"` to follow
+    /// the environment). Applied at the next open: the catalog is read
+    /// once, before the first widget exists.
+    UiLanguageChanged(String),
 
     /// Automatic or manual-only conversion — the same `[general].paused`
     /// the tray's pause item writes, named here as the mode it is
@@ -320,6 +348,14 @@ pub enum Message {
     /// Ask the OS for a permission — macOS only, and always the
     /// system's own dialog.
     SetupRequestPermission(poltertype_input::setup::Permission),
+    /// Create/adopt the local signing identity and write its name into
+    /// `[updates].local_signing_identity` — the Setup pane answer to
+    /// permissions dying on every update.
+    SetupLocalSigning,
+    /// Quit the main tray process and relaunch the bundle: permissions
+    /// are read at startup, and sending the user to hunt Quit in the
+    /// tray after every grant was the complaint.
+    RestartApp,
 
     /// Intercepted so an unsaved wordlist edit is auto-saved before the
     /// window closes. Carries the `window::Id` to close the right one.

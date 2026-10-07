@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
+use poltertype_core::i18n::{tr, tr_args};
 use poltertype_core::settings::SettingsStore;
 use poltertype_update::{Applied, PendingUpdate, UpdateError};
 use tao::event_loop::EventLoopProxy;
@@ -75,8 +76,12 @@ pub(crate) fn pending_for_this_build() -> Option<PendingUpdate> {
 
 pub(crate) fn menu_label(pending: Option<&PendingUpdate>) -> String {
     match pending {
-        Some(p) => format!("⟳ Restart to update — v{}", p.version),
-        None => "Check for updates…".to_owned(),
+        Some(p) => tr_args(
+            "tray.restart_to_update",
+            "⟳ Restart to update — v{}",
+            &[&p.version],
+        ),
+        None => tr("tray.check_updates", "Check for updates…").to_owned(),
     }
 }
 
@@ -101,8 +106,8 @@ pub(crate) fn report_previous_install_failure() {
     warn!(%reason, "the previous update install was refused");
     spawn_error_notification(format!(
         "PolterType could not install its last update.\n{reason}\n\
-         The installer's own log is in the logs folder \
-         (Tray → \"Open Logs Folder…\").\n\
+         The installer's own log is in the logs folder, which the \
+         tray menu opens.\n\
          Download it from {RELEASES_URL}"
     ));
 }
@@ -119,8 +124,8 @@ pub(crate) fn report_previous_install_failure() {
 /// never happens is an app the user has to go and start by hand, which
 /// is precisely how a failing updater turned into a machine with no
 /// PolterType on it.
-pub(crate) fn apply_now(pending: &PendingUpdate, relaunch: bool) -> bool {
-    match poltertype_update::apply(pending, relaunch) {
+pub(crate) fn apply_now(pending: &PendingUpdate, relaunch: bool, sign_identity: &str) -> bool {
+    match poltertype_update::apply(pending, relaunch, sign_identity) {
         Ok(Applied::HandedOff) => {
             info!(
                 version = %pending.version,

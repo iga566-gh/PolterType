@@ -34,6 +34,47 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      # File organization and the platform split — CONTRIBUTING states
+      # both, and until this ran nothing checked either. Cheap: it reads
+      # the sources, it does not build the workspace.
+      - run: cargo xtask style
+
+  # Whose name is on the commit. The convention is in CONTRIBUTING
+  # § Commits; this is what makes it hold, because a squash message is
+  # composed from the branch's commits and a trailer in one of them
+  # rides into `main` unless somebody notices at merge time. Nobody
+  # noticed twice.
+  #
+  # Matched by shape rather than by a list of names, which would date
+  # the moment it was written: a co-author is a person with an address,
+  # and a `noreply@` one that is not GitHub's own privacy address
+  # belongs to no person who can be asked about the patch.
+  authorship:
+    name: commit authorship
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: every co-author is a person
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          base=$(git merge-base "$BASE" "$HEAD")
+          log=$(git log --format='%H %s%n%b' "$base..$HEAD")
+          found=$(printf '%s\n' "$log" \
+            | grep -inE '^[[:space:]]*co-authored-by:.*<[^>]*noreply@' \
+            | grep -viE 'users\.noreply\.github\.com' || true)
+          footers=$(printf '%s\n' "$log" \
+            | grep -inE '^[[:space:]]*[^[:alnum:]]*generated with ' || true)
+          if [ -n "$found$footers" ]; then
+            printf '%s\n' "$found" "$footers"
+            echo "::error::A commit message credits a tool where a person belongs. PolterType credits whoever takes responsibility for the patch — drop the line (git rebase -i, or git commit --amend for the last one) and force-push the branch. See CONTRIBUTING.md § Commits."
+            exit 1
+          fi
+          echo "$(git rev-list --count "$base..$HEAD") commit(s), every co-author a person"
 
   # Lint + build + test in one job per OS. Splitting `check` and `test`
   # across two runners bought nothing: the second runner recompiled the

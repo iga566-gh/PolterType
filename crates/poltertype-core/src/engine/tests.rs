@@ -46,6 +46,44 @@ mod engine_integration_tests {
     /// Fires from inside a replay burst — see `MockEmitter::during_replay`.
     type ReplayHook = Box<dyn Fn() + Send>;
 
+    /// Fires as a chord goes out — see `MockEmitter::on_chord`. The
+    /// stand-in for the focused application, which is what actually
+    /// answers a copy chord by filling the clipboard.
+    type ChordHook = Box<dyn Fn(poltertype_types::SwitchChord) + Send>;
+
+    /// A clipboard that behaves like a desktop's: what is written stays
+    /// readable until something else is written.
+    ///
+    /// The engine never puts a *selection* here itself — it presses
+    /// copy and waits to see whether anything arrives, so the
+    /// application's half of that is `MockEmitter::on_chord`.
+    #[derive(Default)]
+    struct MockClipboard {
+        text: Mutex<Option<String>>,
+        /// Every value written, in order. The restore is as much of
+        /// this feature's contract as the staging is: the user's
+        /// clipboard has to come back.
+        writes: Mutex<Vec<String>>,
+    }
+
+    impl MockClipboard {
+        fn writes(&self) -> Vec<String> {
+            self.writes.lock().clone()
+        }
+    }
+
+    impl poltertype_input::Clipboard for MockClipboard {
+        fn text(&self) -> Result<Option<String>, InputError> {
+            Ok(self.text.lock().clone())
+        }
+
+        fn set_text(&self, text: &str) -> Result<(), InputError> {
+            *self.text.lock() = Some(text.to_owned());
+            self.writes.lock().push(text.to_owned());
+            Ok(())
+        }
+    }
+
     /// Records every operation and mimics the uinput emitter's echo log
     /// (press+release per backspace / replay key, shift presses
     /// included) so tests can replay realistic keyd-style echoes.
@@ -67,6 +105,9 @@ mod engine_integration_tests {
         during_replay: Mutex<Option<ReplayHook>>,
         /// Every desktop switch chord this emitter was asked to send.
         chords: Mutex<Vec<poltertype_types::SwitchChord>>,
+        /// Called as a chord goes out — the focused application's half
+        /// of a copy. See `ChordHook`.
+        on_chord: Mutex<Option<ChordHook>>,
     }
 
     impl MockEmitter {
@@ -86,6 +127,9 @@ mod engine_integration_tests {
     impl KeyEmitter for MockEmitter {
         fn send_chord(&self, chord: poltertype_types::SwitchChord) -> Result<(), InputError> {
             self.chords.lock().push(chord);
+            if let Some(hook) = self.on_chord.lock().as_ref() {
+                hook(chord);
+            }
             Ok(())
         }
 
@@ -151,6 +195,15 @@ mod engine_integration_tests {
         revert: Mutex<bool>,
         /// The chord this desktop answers to, when it has one.
         chord: Mutex<Option<poltertype_types::SwitchChord>>,
+        /// A backend with no reading independent of its own write —
+        /// KDE, Hyprland, IBus. Answers `None`, like theirs.
+        blind: Mutex<bool>,
+        /// How many times the engine asked. The number is the point of
+        /// one test below, not a detail of it.
+        verifies: Mutex<usize>,
+        /// Answers `current` gives before the real one, oldest first — a
+        /// compositor still on the previous window's layout (issue #72).
+        stale: Mutex<std::collections::VecDeque<LayoutId>>,
     }
 
     impl MockSwitcher {
@@ -161,6 +214,9 @@ mod engine_integration_tests {
                 switches: Mutex::new(Vec::new()),
                 revert: Mutex::new(false),
                 chord: Mutex::new(None),
+                blind: Mutex::new(false),
+                verifies: Mutex::new(0),
+                stale: Mutex::new(std::collections::VecDeque::new()),
                 fail_switch: false,
             }
         }
@@ -168,6 +224,9 @@ mod engine_integration_tests {
 
     impl poltertype_layout::LayoutSwitcher for MockSwitcher {
         fn current(&self) -> Result<LayoutId, LayoutError> {
+            if let Some(old) = self.stale.lock().pop_front() {
+                return Ok(old);
+            }
             Ok(self.current.lock().clone())
         }
         fn list_active(&self) -> Result<Vec<LayoutId>, LayoutError> {
@@ -184,6 +243,10 @@ mod engine_integration_tests {
             Ok(())
         }
         fn verify_switched(&self, target: &LayoutId) -> Option<bool> {
+            *self.verifies.lock() += 1;
+            if *self.blind.lock() {
+                return None;
+            }
             Some(*self.current.lock() == *target)
         }
         fn switch_chord(&self) -> Option<poltertype_types::SwitchChord> {
@@ -275,12 +338,18 @@ mod engine_integration_tests {
                 detectors_override,
                 accept_modifiers,
                 |_| {},
+                None,
             )
         }
 
         /// The widest constructor: `tweak` gets the whole `Settings`
         /// before the engine starts, for anything no narrower parameter
-        /// covers.
+        /// covers, and `clipboard` installs one for the selection path.
+        ///
+        /// One argument over the lint's limit, and the narrower
+        /// constructors above are exactly what keeps that from
+        /// reaching the tests.
+        #[allow(clippy::too_many_arguments)]
         fn start_configured(
             idle_timeout_ms: u64,
             emitter: MockEmitter,
@@ -289,6 +358,7 @@ mod engine_integration_tests {
             detectors_override: Option<Vec<Box<dyn Detector>>>,
             accept_modifiers: Option<&str>,
             tweak: impl FnOnce(&mut crate::settings::Settings),
+            clipboard: Option<Arc<dyn poltertype_input::Clipboard>>,
         ) -> Self {
             let mut settings = crate::settings::Settings::default();
             settings.engine.idle_timeout_ms = idle_timeout_ms;
@@ -332,11 +402,10 @@ mod engine_integration_tests {
                 layout_switcher: Arc::<MockSwitcher>::clone(&switcher)
                     as Arc<dyn poltertype_layout::LayoutSwitcher>,
                 key_emitter: Arc::<MockEmitter>::clone(&emitter) as Arc<dyn KeyEmitter>,
-                // Selection conversion is off in these tests, which is
-                // also its shipped default. It reaches into another
-                // application's clipboard and cannot be exercised
-                // against a mock emitter that types into nothing.
-                clipboard: None,
+                // `None` unless a test asked for one: selection
+                // conversion is off by default, which is also its
+                // shipped default.
+                clipboard,
                 // The gate is a no-op in tests: these exercise the
                 // path taken when keystrokes cannot be held back.
                 key_gate: poltertype_input::KeyGate::disabled(),
@@ -888,6 +957,101 @@ mod engine_integration_tests {
         );
     }
 
+    /// Builds a bare `SwitcherEngine` for calling a private method
+    /// directly — no thread, no channels driven, unlike `Harness`,
+    /// which moves the engine into its runner thread and never gives
+    /// it back. Only what `converted()` touches needs to be real.
+    fn bare_engine(current: &str, active: &[&str]) -> (SwitcherEngine, Arc<LayoutDb>) {
+        let active_ids: Vec<LayoutId> = active.iter().map(|s| LayoutId::from(*s)).collect();
+        let layouts = Arc::new(
+            LayoutDb::load(crate::layouts::LoadOptions {
+                active_filter: Some(&active_ids),
+                ..Default::default()
+            })
+            .expect("bundled layouts load"),
+        );
+        let settings = Arc::new(SettingsStore::for_tests(
+            crate::settings::Settings::default(),
+        ));
+        let switcher = Arc::new(MockSwitcher::new(current, active));
+        let (audio, _audio_rx) = crate::audio::AudioPlayer::for_tests();
+        let (out_tx, _out_rx) = crossbeam_channel::unbounded();
+        let engine = SwitcherEngine::new(EngineDeps {
+            settings,
+            layouts: Arc::clone(&layouts),
+            detectors: Vec::new(),
+            layout_switcher: switcher as Arc<dyn poltertype_layout::LayoutSwitcher>,
+            key_emitter: Arc::new(MockEmitter::default()) as Arc<dyn KeyEmitter>,
+            clipboard: None,
+            key_gate: poltertype_input::KeyGate::disabled(),
+            focus_tracker: Arc::new(NoopFocusTracker),
+            audio: Arc::new(audio),
+            out_tx,
+            suggester: None,
+        });
+        (engine, layouts)
+    }
+
+    /// Regression: force-by-selection trusted `current()` for the
+    /// *source* layout, not the text. If the layout had moved on since
+    /// the word was typed — exactly what the very next word does when
+    /// it triggers auto-correction — `converted()` tried
+    /// transliterating from the wrong layout, `transliterate_to`'s own
+    /// guard refused (no letter of that layout in the text), and the
+    /// whole gesture read as "nothing was selected". Plan and test
+    /// words are from `plans/backlog.md` (P2, keyboard-switcher track).
+    #[test]
+    fn selection_conversion_direction_follows_the_text_not_the_current_layout() {
+        let (engine, layouts) = bare_engine("uk-UA", &["en-US", "uk-UA"]);
+        let en = layouts.get(&LayoutId::from("en-US")).expect("en-US loaded");
+        let uk = layouts.get(&LayoutId::from("uk-UA")).expect("uk-UA loaded");
+        let expected = en
+            .transliterate_to("ghbdsn", uk)
+            .expect("en-US -> uk-UA must convert `ghbdsn`");
+
+        // `current()` says uk-UA, but "ghbdsn" (`привіт` mistyped) was
+        // typed under en-US — the old code trusted `current()` and
+        // the force-switch silently did nothing.
+        assert_eq!(
+            engine.converted("ghbdsn"),
+            Some((expected, LayoutId::from("en-US"), LayoutId::from("uk-UA"))),
+            "must detect en-US as the source from the text, not uk-UA from current()"
+        );
+    }
+
+    /// Mirror of the regression above: `current()` already names the
+    /// right source, so the first try must still succeed directly —
+    /// the fallback exists for the case above, not to replace the
+    /// ordinary one.
+    #[test]
+    fn selection_conversion_direction_still_works_when_current_is_right() {
+        let (engine, layouts) = bare_engine("en-US", &["en-US", "uk-UA"]);
+        let en = layouts.get(&LayoutId::from("en-US")).expect("en-US loaded");
+        let uk = layouts.get(&LayoutId::from("uk-UA")).expect("uk-UA loaded");
+        let expected = en
+            .transliterate_to("ghbdsn", uk)
+            .expect("en-US -> uk-UA must convert `ghbdsn`");
+
+        assert_eq!(
+            engine.converted("ghbdsn"),
+            Some((expected, LayoutId::from("en-US"), LayoutId::from("uk-UA"))),
+            "a source that `current()` already gets right must not need the fallback"
+        );
+    }
+
+    /// Text that belongs to neither active layout must not be forced
+    /// through either direction — `transliterate_to`'s guard has to
+    /// win both tries, not just the first.
+    #[test]
+    fn selection_conversion_direction_gives_up_on_text_neither_layout_typed() {
+        let (engine, _layouts) = bare_engine("uk-UA", &["en-US", "uk-UA"]);
+        assert_eq!(
+            engine.converted("12345"),
+            None,
+            "digits belong to no layout's alphabet — nothing to convert"
+        );
+    }
+
     /// A word typed under a latched Caps Lock has to go back out on the
     /// Shift states the user's fingers actually had.
     ///
@@ -978,6 +1142,48 @@ mod engine_integration_tests {
         );
         let (ops, _) = h.stop();
         assert!(!ops.is_empty(), "and the correction still happened");
+    }
+
+    /// A backend that cannot answer is asked once, not three times.
+    ///
+    /// The sampling exists for a settings daemon that puts its own
+    /// group back a moment later (see the MATE test above), and it
+    /// costs two sleeps. A backend answering `None` has no reading to
+    /// sample, so those sleeps bought nothing and sat in front of every
+    /// manual switch on KDE, Hyprland and IBus — issue #71, where they
+    /// were a fifth of the wait the reporter measured.
+    #[test]
+    fn a_backend_that_cannot_answer_is_not_asked_again() {
+        let h = Harness::start(60_000);
+        *h.switcher.blind.lock() = true;
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.settle();
+        let asked = *h.switcher.verifies.lock();
+        let (ops, _) = h.stop();
+        assert!(!ops.is_empty(), "the correction still happens: {ops:?}");
+        assert_eq!(
+            asked, 1,
+            "a backend that cannot see past its own write is asked once"
+        );
+    }
+
+    /// The same backend, seeing properly, is still sampled across the
+    /// window — the fix above must not have taken MATE's protection
+    /// with it.
+    #[test]
+    fn a_backend_that_can_answer_is_still_sampled_across_the_window() {
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.settle();
+        let asked = *h.switcher.verifies.lock();
+        let (ops, _) = h.stop();
+        assert!(!ops.is_empty(), "the correction happens: {ops:?}");
+        assert!(
+            asked >= 3,
+            "a reading worth having is taken three times, got {asked}"
+        );
     }
 
     /// When the desktop puts the layout back *and* its shortcut does
@@ -1414,6 +1620,206 @@ mod engine_integration_tests {
                 EmitOp::Keys(GHBDSN.iter().copied().chain([SPACE]).collect()),
             ],
             "the word after a click must correct with exactly its own length"
+        );
+    }
+
+    // ─── Selection conversion ────────────────────────────────────────
+
+    /// A harness whose force-switch has no word to act on and a
+    /// clipboard to fall back to, with the focused application's half
+    /// of a copy wired to the emitter: press copy, and `selection`
+    /// appears on the clipboard, exactly as an application answers
+    /// `Ctrl+C`.
+    fn selection_harness(selection: &str) -> (Harness, Arc<MockClipboard>) {
+        let clipboard = Arc::new(MockClipboard::default());
+        let emitter = MockEmitter::default();
+        let cb = Arc::clone(&clipboard);
+        let text = selection.to_owned();
+        *emitter.on_chord.lock() = Some(Box::new(move |chord| {
+            if chord == crate::engine::consts::COPY_CHORD {
+                use poltertype_input::Clipboard as _;
+                let _ = cb.set_text(&text);
+            }
+        }));
+        let h = Harness::start_configured(
+            60_000,
+            emitter,
+            false,
+            None,
+            None,
+            None,
+            |s| s.selection.enabled = true,
+            Some(Arc::clone(&clipboard) as Arc<dyn poltertype_input::Clipboard>),
+        );
+        (h, clipboard)
+    }
+
+    /// The feature's own shape, and its first end-to-end test: nothing
+    /// to switch, so the hotkey copies, converts and pastes — then puts
+    /// the user's clipboard back.
+    #[test]
+    fn a_selection_is_converted_and_the_clipboard_restored() {
+        // `ghbdsn` is `привіт` typed under en-US.
+        let (h, clipboard) = selection_harness("ghbdsn");
+        {
+            use poltertype_input::Clipboard as _;
+            clipboard
+                .set_text("something the user copied earlier")
+                .expect("mock clipboard");
+        }
+
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+
+        let writes = clipboard.writes();
+        assert!(
+            writes.iter().any(|w| w == "привіт"),
+            "the converted text must be staged for the paste: {writes:?}"
+        );
+        assert_eq!(
+            writes.last().map(String::as_str),
+            Some("something the user copied earlier"),
+            "and the user's own clipboard must be the last thing put back: {writes:?}"
+        );
+    }
+
+    /// Issue #51, the half that only X11 shows: while the chord that
+    /// asked for the conversion is still held, an `XGrabKey` passive
+    /// grab is an *active* one and everything we emit goes to the
+    /// client holding it — so the copy chord never reaches the window
+    /// the selection is in, and the gesture reads as "nothing was
+    /// selected". Every other force-switch path already waits for the
+    /// key to come up; this one did not.
+    #[test]
+    fn a_selection_is_left_alone_until_the_hotkey_comes_up() {
+        const KEY: u32 = 0x43; // F9
+        let (h, clipboard) = selection_harness("ghbdsn");
+        h.cmd_tx
+            .send(EngineCommand::SetKeystreamHotkeys(KeystreamHotkeys {
+                // *Grabbed*, which is what makes the key invisible to
+                // us on X11 and is how `trigger_key_down` reads it.
+                grabbed: [
+                    Some(Chord {
+                        ctrl: true,
+                        shift: true,
+                        alt: false,
+                        meta: false,
+                        scancode: KEY,
+                    }),
+                    None,
+                ],
+                pause: None,
+                switch_last: None,
+            }))
+            .expect("engine alive");
+
+        let both = poltertype_types::Modifiers {
+            control: true,
+            shift: true,
+            ..poltertype_types::Modifiers::NONE
+        };
+        h.key_mods(0x1D, KeyDirection::Press, both);
+        h.key_mods(0x2A, KeyDirection::Press, both);
+        // Before the command: the run loop takes keys and commands off
+        // two channels, and the modifiers have to be on record as held
+        // by the time the force-switch is handled.
+        h.settle();
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            clipboard.writes().is_empty(),
+            "nothing may be emitted at the clipboard while the chord is down: {:?}",
+            clipboard.writes()
+        );
+
+        // Finger off, and the same press finishes its work.
+        h.key_mods(
+            0x2A,
+            KeyDirection::Release,
+            poltertype_types::Modifiers::NONE,
+        );
+        h.key_mods(
+            0x1D,
+            KeyDirection::Release,
+            poltertype_types::Modifiers::NONE,
+        );
+        h.settle();
+        assert!(
+            clipboard.writes().iter().any(|w| w == "привіт"),
+            "and once it is up, the selection converts: {:?}",
+            clipboard.writes()
+        );
+    }
+
+    /// Issue #57: an arrow key, then a whole word typed after it, then
+    /// the manual hotkey — and nothing happened.
+    ///
+    /// `abandon` poisons the buffer so the *interrupted* word is never
+    /// corrected from the tail it saw. Nav clears the buffer with it,
+    /// so the poison could only ever reach the *next* word — one
+    /// watched from its first key, at a caret that is exactly where we
+    /// put it. `word_in_progress` refuses a poisoned buffer, so the
+    /// gesture stayed dead until a separator was typed. Same shape as
+    /// issues #40 and #44, one trigger further along.
+    #[test]
+    fn the_manual_hotkey_reaches_a_word_typed_after_a_caret_move() {
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN[..3]);
+        h.tap(105); // KEY_LEFT — the caret goes somewhere we can't see
+        type_word(&h, &GHBDSN);
+        h.settle();
+
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+        assert_eq!(
+            erase_counts(&h),
+            vec![GHBDSN.len()],
+            "the hotkey must convert the word typed after the arrow: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// Issue #56: after a manual switch, clicking away and back left
+    /// the hotkey dead for the next word.
+    ///
+    /// The switched word stays in the buffer (`settle`), so the click
+    /// that leaves the window abandons a non-empty buffer and poisons
+    /// it — and the poison outlived the click back, the new window and
+    /// a word typed entirely under our own eyes.
+    #[test]
+    fn the_manual_hotkey_survives_leaving_a_window_and_coming_back() {
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN);
+        h.settle();
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+        assert_eq!(
+            erase_counts(&h),
+            vec![GHBDSN.len()],
+            "precondition: the first press converts the word in progress"
+        );
+
+        h.press(poltertype_types::SC_POINTER_BUTTON); // click another window
+        h.press(poltertype_types::SC_POINTER_BUTTON); // and click back
+        type_word(&h, &GHBDSN);
+        h.settle();
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+        assert_eq!(
+            erase_counts(&h),
+            vec![GHBDSN.len(), GHBDSN.len()],
+            "the second press must convert the word typed after the clicks: {:?}",
+            h.emitter.ops()
         );
     }
 
@@ -1961,6 +2367,7 @@ mod engine_integration_tests {
             None,
             None,
             |s| s.exceptions.word_whitelist = vec!["GHBDSN".into()],
+            None,
         );
         type_word(&h, &GHBDSN);
         h.tap(SPACE);
@@ -2008,6 +2415,116 @@ mod engine_integration_tests {
             *h.switcher.switches.lock(),
             vec![LayoutId::from("uk-UA"), LayoutId::from("en-US")],
             "the hotkey must still reach the last word after a pause"
+        );
+    }
+
+    /// `F12`, the key of the chord the two tests below grab.
+    const F12: u32 = 0x58;
+
+    /// The other half of the same pause: a word still being typed.
+    ///
+    /// Idle hygiene ran on the chord's own `Ctrl` press and abandoned
+    /// the word under the caret, so the hotkey found neither it nor a
+    /// stash and did nothing — every press a person makes after
+    /// stopping to look at the word. Measured on Windows, 2026-10-07:
+    /// every refused press in a month of logs followed an idle abandon
+    /// by under a second.
+    #[test]
+    fn the_hotkey_after_a_pause_switches_the_word_still_being_typed() {
+        let h = Harness::start(50); // 50 ms idle timeout
+        grab_default_switch_chord(&h, F12);
+        type_word(&h, &GHBDSN);
+        h.settle();
+
+        std::thread::sleep(Duration::from_millis(120));
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        assert_eq!(
+            erase_counts(&h).last(),
+            Some(&GHBDSN.len()),
+            "the word under the caret, after a pause: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// …and with a word before it still stashed, the abandon handed the
+    /// hotkey that one instead: its backspaces ate the word being typed
+    /// — or the selection standing in its place — and the previous word
+    /// was typed over it.
+    #[test]
+    fn the_hotkey_after_a_pause_does_not_reach_back_past_the_word_being_typed() {
+        let h = Harness::start(50); // 50 ms idle timeout
+        grab_default_switch_chord(&h, F12);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        type_word(&h, &GHBDSN);
+        h.settle();
+        let before = erase_counts(&h).len();
+
+        std::thread::sleep(Duration::from_millis(120));
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        assert_eq!(
+            erase_counts(&h)[before..],
+            [GHBDSN.len()],
+            "the word under the caret, not the one before it: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// A switch by hand counts as activity. The chord's keys do not
+    /// reset the idle clock, so without that the first letter typed
+    /// after switching an unfinished word found the pause still
+    /// standing, swept the word it had just placed, and left the next
+    /// press nothing it would touch.
+    #[test]
+    fn typing_on_after_switching_after_a_pause_keeps_the_word() {
+        let h = Harness::start(3_000); // longer than `settle` stays quiet
+        grab_default_switch_chord(&h, F12);
+        type_word(&h, &GHBDSN);
+        h.settle();
+
+        std::thread::sleep(Duration::from_millis(3_200));
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        h.tap(GHBDSN[0]);
+        h.settle();
+
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        assert_eq!(
+            erase_counts(&h).last(),
+            Some(&(GHBDSN.len() + 1)),
+            "the switched word and the letter typed onto it: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// The fence for the two above. A bare modifier after a pause does
+    /// not run idle hygiene, but it does not stand in for typing either:
+    /// the next real key still finds the pause and abandons the word, so
+    /// a click the listener never saw cannot splice what follows onto it.
+    #[test]
+    fn a_bare_modifier_after_a_pause_does_not_keep_the_word_alive() {
+        let h = Harness::start(50); // 50 ms idle timeout
+        type_word(&h, &GHBDSN[..3]);
+        h.settle();
+        std::thread::sleep(Duration::from_millis(120));
+        h.tap(0x2A); // Shift, as for a capital letter
+        type_word(&h, &GHBDSN[3..]);
+        h.tap(SPACE);
+        h.settle();
+        let (ops, _) = h.stop();
+        assert_eq!(
+            ops,
+            vec![],
+            "the word interrupted by the pause must still not be corrected"
         );
     }
 
@@ -2291,6 +2808,7 @@ mod engine_integration_tests {
             None,
             None,
             |s| s.general.paused = true,
+            None,
         );
         type_word(&h, &GHBDSN);
         h.tap(SPACE);
@@ -2323,6 +2841,7 @@ mod engine_integration_tests {
             None,
             None,
             |s| s.general.paused = true,
+            None,
         );
         h.cmd_tx
             .send(EngineCommand::SetKeystreamHotkeys(KeystreamHotkeys {
@@ -2370,6 +2889,7 @@ mod engine_integration_tests {
             None,
             None,
             |s| s.general.paused = true,
+            None,
         );
         h.cmd_tx
             .send(EngineCommand::SetPaused(true))
@@ -2623,9 +3143,12 @@ mod engine_integration_tests {
     fn a_poisoned_buffer_is_left_alone_by_the_hotkey() {
         let h = Harness::start(50);
         type_word(&h, &GHBDSN);
-        // The idle sweep abandons the word in flight, which poisons.
+        // The idle sweep abandons the word in flight, which poisons —
+        // on the next key that is typing. The chord's own modifier is
+        // not that key: see
+        // `the_hotkey_after_a_pause_switches_the_word_still_being_typed`.
         std::thread::sleep(Duration::from_millis(160));
-        h.tap(0x1D);
+        h.tap(GHBDSN[0]);
         h.settle();
 
         h.cmd_tx
@@ -2636,6 +3159,75 @@ mod engine_integration_tests {
         assert!(
             h.switcher.switches.lock().is_empty(),
             "a caret we cannot vouch for must not be typed over"
+        );
+    }
+
+    /// Issue #65: `Ctrl+Shift+→` is how people select the phrase they
+    /// want converted, and the stash it left behind used to eat the
+    /// hotkey — rewriting the word before the one the caret had moved
+    /// away from. The same arrow pressed without Ctrl has always
+    /// dropped the stash; the modifier is the only difference.
+    #[test]
+    fn a_selection_gesture_leaves_the_hotkey_no_stale_word() {
+        const RIGHT: u32 = 0x4D;
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        let after_correction = h.switcher.switches.lock().clone();
+
+        let ctrl_shift = poltertype_types::Modifiers {
+            control: true,
+            shift: true,
+            ..poltertype_types::Modifiers::NONE
+        };
+        h.key_mods(RIGHT, KeyDirection::Press, ctrl_shift);
+        h.key_mods(RIGHT, KeyDirection::Release, ctrl_shift);
+        h.settle();
+
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+
+        assert_eq!(
+            *h.switcher.switches.lock(),
+            after_correction,
+            "the caret has moved: the stashed word is no longer under it"
+        );
+    }
+
+    /// The other half of the same rule. A shortcut whose effect we
+    /// cannot read leaves the stash alone — `Ctrl+S` moves no caret,
+    /// and the hotkey after a save has always worked.
+    #[test]
+    fn a_shortcut_that_moves_no_caret_still_leaves_the_hotkey_its_word() {
+        const S: u32 = 0x1F;
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        let after_correction = h.switcher.switches.lock().clone();
+
+        let ctrl = poltertype_types::Modifiers {
+            control: true,
+            ..poltertype_types::Modifiers::NONE
+        };
+        h.key_mods(S, KeyDirection::Press, ctrl);
+        h.key_mods(S, KeyDirection::Release, ctrl);
+        h.settle();
+
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+
+        assert_ne!(
+            *h.switcher.switches.lock(),
+            after_correction,
+            "a save does not move the caret, so the word is still there to switch"
         );
     }
 
@@ -3152,6 +3744,7 @@ mod engine_integration_tests {
             None,
             None,
             |s| s.general.sound_on_correct = false,
+            None,
         );
         type_word(&quiet, &GHBDSN);
         quiet.settle();
@@ -3982,6 +4575,178 @@ mod engine_integration_tests {
             erases,
             vec![GHBDSN.len() + 1],
             "the held chord must undo the correction exactly once"
+        );
+    }
+
+    /// `Ctrl+V` — the chord that arms the paste guard.
+    fn paste_chord(h: &Harness) {
+        let ctrl = poltertype_types::Modifiers {
+            control: true,
+            ..poltertype_types::Modifiers::NONE
+        };
+        h.key_mods(SC_V, KeyDirection::Press, ctrl);
+        h.key_mods(SC_V, KeyDirection::Release, ctrl);
+    }
+
+    /// Issue #72: pasting anything — an image into a chat box being the
+    /// report — armed a window in which the *next* finished word was not
+    /// stashed at all, because the guard skipped the whole decision step
+    /// and the stash is written inside it. Auto-switching staying quiet
+    /// after a paste is the point; the manual hotkey going quiet with it
+    /// is what leaves a person pressing a key that does nothing, in the
+    /// exact second after a paste when they are typing. Same shape as
+    /// pause in #36, one gate lower.
+    #[test]
+    fn a_word_finished_inside_the_paste_guard_still_answers_the_hotkey() {
+        let h = Harness::start(60_000);
+        paste_chord(&h);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE); // completes well inside PASTE_GUARD
+        h.settle();
+
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+
+        assert_eq!(
+            h.switcher.switches.lock().as_slice(),
+            &[LayoutId::new("uk-UA")],
+            "the hotkey must still reach a word the paste guard declined to correct"
+        );
+    }
+
+    /// …and the guard itself still does its job: the automatic pass must
+    /// not retype text that may be a paste replayed as keystrokes.
+    #[test]
+    fn the_paste_guard_still_keeps_the_automatic_pass_quiet() {
+        let h = Harness::start(60_000);
+        paste_chord(&h);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.settle();
+
+        assert!(
+            h.switcher.switches.lock().is_empty(),
+            "a word completed inside the guard must not be corrected on its own"
+        );
+    }
+
+    /// Issue #74: the boundary is acted on at its press, and the finger
+    /// comes off it a moment later. A correction that emits in between
+    /// loses that release on Linux whenever the key gate holds the
+    /// keyboard — the compositor saw the press and never the release, so
+    /// the replayed space is dropped as a second press of a key already
+    /// down, and so is the user's next one. Nothing may go out until the
+    /// key is up.
+    #[test]
+    fn a_correction_waits_for_the_boundary_key_to_come_up() {
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN);
+        h.press(SPACE);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            h.emitter.ops().is_empty(),
+            "nothing may be emitted while the boundary key is held: {:?}",
+            h.emitter.ops()
+        );
+
+        h.release(SPACE);
+        h.settle();
+        assert_eq!(
+            erase_counts(&h),
+            vec![GHBDSN.len() + 1],
+            "once it is up, the word and its space are corrected as usual"
+        );
+    }
+
+    /// …but a key whose release never arrives must not stall every
+    /// correction after it: the wait ends on the absorb deadline.
+    #[test]
+    fn a_key_that_never_comes_up_does_not_stop_the_correction() {
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN);
+        h.press(SPACE);
+        h.settle();
+        assert_eq!(
+            erase_counts(&h),
+            vec![GHBDSN.len() + 1],
+            "the absorb deadline still bounds the wait"
+        );
+    }
+
+    /// `Alt+Tab` — the shortcut that hands the keyboard to another window.
+    fn alt_tab(h: &Harness) {
+        let alt = poltertype_types::Modifiers {
+            alt: true,
+            ..poltertype_types::Modifiers::NONE
+        };
+        h.key_mods(0x0F, KeyDirection::Press, alt);
+        h.key_mods(0x0F, KeyDirection::Release, alt);
+    }
+
+    /// Issue #72, as the reporter narrowed it: Plasma keeping a layout
+    /// per window, `Alt+Tab`, a word typed at once, and the hotkey
+    /// converting nothing more often than not. The word's first key is
+    /// read off the device before the compositor has applied the new
+    /// window's layout, so the stamp named the old window's — and the
+    /// hotkey "switched" to the layout already in effect and retyped
+    /// the word unchanged. Measured in the VM on 2026-09-25.
+    #[test]
+    fn a_word_typed_as_the_focus_moves_is_stamped_with_the_new_windows_layout() {
+        let h = Harness::start(60_000);
+        h.switcher.stale.lock().push_back(LayoutId::from("uk-UA"));
+        alt_tab(&h);
+        type_word(&h, &GHBDSN);
+        h.settle();
+
+        h.cmd_tx
+            .send(EngineCommand::SwitchLastForcefully)
+            .expect("engine alive");
+        h.settle();
+
+        assert_eq!(
+            h.switcher.switches.lock().as_slice(),
+            &[LayoutId::new("uk-UA")],
+            "typed under en-US, so the hotkey has to move it to uk-UA"
+        );
+    }
+
+    /// The same stale stamp silenced the automatic pass too: read
+    /// against the layout in effect at the boundary it looked like a
+    /// switch by hand mid-word, and those are left alone.
+    #[test]
+    fn a_word_typed_as_the_focus_moves_is_still_corrected_on_its_own() {
+        let h = Harness::start(60_000);
+        h.switcher.stale.lock().push_back(LayoutId::from("uk-UA"));
+        alt_tab(&h);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.settle();
+
+        assert_eq!(
+            h.switcher.switches.lock().as_slice(),
+            &[LayoutId::new("uk-UA")],
+            "a stale first reading must not pass for a switch by hand"
+        );
+    }
+
+    /// …and nowhere else: a word that started after a boundary keeps the
+    /// stamp its first key got, which is what lets a switch by hand
+    /// mid-word be noticed rather than overwritten.
+    #[test]
+    fn a_word_started_after_a_boundary_keeps_its_first_stamp() {
+        let h = Harness::start(60_000);
+        type_word(&h, &GHBDSN[..2]);
+        h.settle();
+        *h.switcher.current.lock() = LayoutId::from("uk-UA");
+        type_word(&h, &GHBDSN[2..]);
+        h.tap(SPACE);
+        h.settle();
+
+        assert!(
+            h.switcher.switches.lock().is_empty(),
+            "a switch by hand inside a word must still read as one"
         );
     }
 }

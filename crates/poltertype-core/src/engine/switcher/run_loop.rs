@@ -9,9 +9,13 @@ use tracing::{debug, info};
 
 use crate::audio::SoundEvent;
 use crate::engine::buffer::{WordBoundary, WordBuffer};
-use crate::engine::consts::{FORCE_SWITCH_REARM, LAST_WORD_TTL, PASTE_GUARD, SC_BACKSPACE};
+use crate::engine::consts::{
+    FOCUS_SETTLE, FORCE_SWITCH_REARM, LAST_WORD_TTL, PASTE_GUARD, SC_BACKSPACE,
+};
 use crate::engine::enums::{Either, EngineCommand, SwitcherEvent};
-use crate::engine::heuristics::{is_modifier_scancode, is_paste_shortcut};
+use crate::engine::heuristics::{
+    is_modifier_scancode, is_paste_shortcut, moves_caret_or_selection,
+};
 
 use super::engine::SwitcherEngine;
 
@@ -52,9 +56,18 @@ impl SwitcherEngine {
                         continue;
                     }
                     *self.held_modifiers.write() = ev.modifiers;
+                    self.track_keys_down(&ev);
                     self.click_grace_tick(&ev);
                     self.check_keystream_hotkeys(&ev, &mut buffer, &key_rx);
-                    if last_event_at.elapsed() > idle_timeout {
+                    // The chord's own keys neither sweep nor count as
+                    // typing — see `spares_idle_sweep`. A switch by hand
+                    // does count: it just placed the caret, and a word
+                    // it switched mid-flight must not be swept by the
+                    // next letter as if the pause before it still stood.
+                    let spared = self.spares_idle_sweep(&ev);
+                    let quiet_since = (*self.last_force_switch.read())
+                        .map_or(last_event_at, |t| t.max(last_event_at));
+                    if !spared && quiet_since.elapsed() > idle_timeout {
                         // A live offer overrides idle hygiene while no
                         // word is mid-flight: pausing to read the
                         // tooltip is the expected interaction, and
@@ -87,7 +100,9 @@ impl SwitcherEngine {
                             self.dismiss_suggestions(None);
                         }
                     }
-                    last_event_at = Instant::now();
+                    if !spared {
+                        last_event_at = Instant::now();
+                    }
                     self.handle_key(ev, &mut buffer, &key_rx);
 
                     // Drain pending commands so hotkeys stay snappy
@@ -247,7 +262,7 @@ impl SwitcherEngine {
                     // user selected something instead", and the only
                     // moment worth spending a `Ctrl+C` on. Off by
                     // default; see `SelectionSettings`.
-                    if self.convert_selection() {
+                    if self.convert_selection(key_rx) {
                         *self.last_force_switch.write() = Some(Instant::now());
                     }
                 } else {
@@ -305,12 +320,36 @@ impl SwitcherEngine {
             None
         };
 
-        let was_empty = buffer.keys().is_empty();
+        let before = buffer.keys().len();
         let outcome = buffer.feed(ev, produced, letter_in_any_layout);
-        if was_empty && !buffer.keys().is_empty() {
+        if before == 0 && !buffer.keys().is_empty() {
             *self.word_layout.write() = self.layout_switcher.current().ok();
+            *self.word_layout_settles_at.write() =
+                (!buffer.word_started_clean()).then(|| Instant::now() + FOCUS_SETTLE);
+        } else if buffer.keys().len() > before {
+            self.settle_word_layout();
         }
         outcome
+    }
+
+    /// Re-read the word's layout while its stamp may still be the
+    /// previous window's (issue #72).
+    ///
+    /// Only inside [`FOCUS_SETTLE`] of a word that started after the
+    /// caret context broke: anywhere else a layout that differs from the
+    /// stamp is the user switching by hand mid-word, which the stamp
+    /// exists to notice.
+    pub(super) fn settle_word_layout(&self) {
+        let open = self
+            .word_layout_settles_at
+            .read()
+            .is_some_and(|until| Instant::now() < until);
+        if !open {
+            return;
+        }
+        if let Ok(fresh) = self.layout_switcher.current_fresh() {
+            *self.word_layout.write() = Some(fresh);
+        }
     }
 
     pub(super) fn handle_key(
@@ -377,6 +416,17 @@ impl SwitcherEngine {
             // A shortcut can also move the caret (Ctrl+End,
             // app-specific jumps), so the next word may start mid-word.
             buffer.mark_context_unclean();
+            if moves_caret_or_selection(ev.scancode) {
+                // Except when the shortcut is one we can read. A
+                // correction backspaces *from the caret*, so a stash
+                // that outlives `Ctrl+Shift+→` gets applied wherever
+                // the caret ended up — and after `Ctrl+A` its first
+                // Backspace takes the whole selection with it. Dropping
+                // it here is also what lets the hotkey fall through to
+                // the selection, which is what the user who just
+                // selected something meant by pressing it (issue #65).
+                *self.last_word.write() = None;
+            }
             self.dismiss_suggestions(None);
             return;
         }
@@ -420,10 +470,6 @@ impl SwitcherEngine {
                                  past word start) — not correcting"
                             .into(),
                     });
-                } else if Instant::now() < *self.paste_guard_until.read() {
-                    // Almost certainly pasted text replayed as
-                    // keystrokes, not typing.
-                    debug!("paste guard active — skipping correction for completed word");
                 } else {
                     self.decide(
                         buffer,

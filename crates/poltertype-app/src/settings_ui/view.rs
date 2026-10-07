@@ -6,13 +6,14 @@
 //! via `self.brand()`, so every pane re-themes with the window.
 
 use iced::widget::{
-    Button, Checkbox, Column, Container, Row, Scrollable, Space, Text, TextInput, container, rule,
-    text_editor,
+    Button, Checkbox, Column, Container, PickList, Row, Scrollable, Space, Text, TextInput,
+    container, rule, text_editor,
 };
 use iced::{Alignment, Element, Font, Length, Padding};
 
 use poltertype_core::i18n::{tr, tr_args};
 use poltertype_core::settings::TrayIconStyle;
+use poltertype_input::ReplaySpeed;
 
 use crate::consts::{
     DEFAULT_PAUSE_TOGGLE, DEFAULT_SWITCH_LAST, MACOS_SAFE_PAUSE_TOGGLE, WAYLAND_SAFE_SWITCH_LAST,
@@ -134,15 +135,18 @@ impl SettingsApp {
                     setup_nav_label(self.setup.needs_attention()),
                     Pane::Setup,
                 ))
-                .push(item("Languages", Pane::Languages))
-                .push(item("Hotkeys", Pane::Hotkeys))
-                .push(item("Commands", Pane::Commands))
-                .push(item("Wordlists", Pane::Wordlists))
-                .push(item("General", Pane::General))
-                .push(item("Exceptions", Pane::Exceptions))
-                .push(item("Suggestions", Pane::Suggestions))
-                .push(item("Plug-ins", Pane::Plugins))
-                .push(item("About", Pane::About))
+                .push(item(tr("nav.languages", "Languages"), Pane::Languages))
+                .push(item(tr("nav.hotkeys", "Hotkeys"), Pane::Hotkeys))
+                .push(item(tr("nav.commands", "Commands"), Pane::Commands))
+                .push(item(tr("nav.wordlists", "Wordlists"), Pane::Wordlists))
+                .push(item(tr("nav.general", "General"), Pane::General))
+                .push(item(tr("nav.exceptions", "Exceptions"), Pane::Exceptions))
+                .push(item(
+                    tr("nav.suggestions", "Suggestions"),
+                    Pane::Suggestions,
+                ))
+                .push(item(tr("nav.plugins", "Plug-ins"), Pane::Plugins))
+                .push(item(tr("nav.about", "About"), Pane::About))
                 .push(Space::new().height(Length::Fill))
                 .push(
                     Text::new(concat!("v", env!("CARGO_PKG_VERSION")))
@@ -206,10 +210,11 @@ impl SettingsApp {
 
         if self.os_layouts.is_empty() {
             col = col.push(card(
-                Text::new(
+                Text::new(tr(
+                    "ui.no_os_layouts",
                     "No OS layouts detected. Add languages in your system's keyboard \
                      settings, then reopen this window.",
-                )
+                ))
                 .size(13)
                 .color(b.muted),
             ));
@@ -255,9 +260,12 @@ impl SettingsApp {
 
         col.push(tip(
             b,
-            "Tip: 'Active' is the allow-list — when nothing is restricted \
-             every OS layout is included. 'Ignore' is a hard veto and \
-             always wins.",
+            tr(
+                "languages.tip",
+                "Tip: 'Active' is the allow-list — when nothing is restricted \
+                 every OS layout is included. 'Ignore' is a hard veto and \
+                 always wins.",
+            ),
         ))
         .into()
     }
@@ -282,7 +290,11 @@ impl SettingsApp {
                 // ignored the tap — which is what a modifier-only
                 // binding's first half is bound to look like.
                 let prompt = match self.mod_capture.pending_tap {
-                    Some(m) => format!("Tap {} again to bind it…", format_mod_chord(m, false)),
+                    Some(m) => tr_args(
+                        "hotkeys.tap_again",
+                        "Tap {} again to bind it…",
+                        &[&format_mod_chord(m, false)],
+                    ),
                     None => tr(
                         "hotkeys.press_combination_esc_cancel",
                         "Press a combination… (Esc to cancel)",
@@ -346,21 +358,24 @@ impl SettingsApp {
                 // Not "registered with the OS": on the Wayland/evdev
                 // backend they are read off the key stream instead, and
                 // the pane said otherwise while doing exactly that.
-                "Hotkeys are global — they fire whatever window has focus. \
-                 Click 'Rebind', press the new combination, then save. \
-                 The new binding is in force as soon as this window closes."
-                    .to_owned(),
+                tr(
+                    "hotkeys.subtitle",
+                    "Hotkeys are global — they fire whatever window has focus. \
+                     Click 'Rebind', press the new combination, then save. \
+                     The new binding is in force as soon as this window closes.",
+                )
+                .to_owned(),
             ))
             .push(card(
                 Column::new()
                     .spacing(12)
                     .push(row(
-                        "Pause / resume auto-switch",
+                        tr("hotkeys.pause_toggle", "Pause / resume auto-switch"),
                         &self.settings.hotkeys.pause_toggle,
                         HotkeyKind::Pause,
                     ))
                     .push(row(
-                        "Force-switch the last word",
+                        tr("hotkeys.switch_last", "Force-switch the last word"),
                         &self.settings.hotkeys.manual_switch_last,
                         HotkeyKind::SwitchLast,
                     ))
@@ -368,7 +383,8 @@ impl SettingsApp {
             ))
             .push(tip(
                 b,
-                format!(
+                tr_args(
+                    "hotkeys.tip",
                     "Tip: a combination needs at least one of {} — a bare \
                      key would clash with typing, and Caps Lock is the one \
                      exception. Modifiers on their own count too: hold two \
@@ -377,9 +393,11 @@ impl SettingsApp {
                      pressed in between, so they leave the shortcuts they \
                      are part of alone. \
                      Esc cancels capture without changing anything.",
-                    key_list(&["Ctrl", "Alt", "Shift", "Cmd"], " / "),
-                    key_list(&["Ctrl", "Shift"], "+"),
-                    key_list(&["Shift", "Shift"], "+"),
+                    &[
+                        &key_list(&["Ctrl", "Alt", "Shift", "Cmd"], " / "),
+                        &key_list(&["Ctrl", "Shift"], "+"),
+                        &key_list(&["Shift", "Shift"], "+"),
+                    ],
                 ),
             ))
             .into()
@@ -397,17 +415,27 @@ impl SettingsApp {
     fn selection_row(&self, b: &'static theme::BrandPalette) -> Element<'static, Message> {
         let available = self.selection_support.is_ok();
         let mut checkbox = Checkbox::new(self.settings.selection.enabled && available)
-            .label("Also convert selected text")
+            .label(tr(
+                "hotkeys.also_convert_selection",
+                "Also convert selected text",
+            ))
             .text_size(13);
         if available {
             checkbox = checkbox.on_toggle(Message::SelectionEnabledToggled);
         }
         let note = match &self.selection_support {
-            Ok(()) => "With this on, the force-switch key converts whatever you have \
-                       selected when there is no just-typed word to fix. It copies the \
-                       selection to read it, then puts your clipboard back."
-                .to_owned(),
-            Err(why) => format!("Not available here — {why}."),
+            Ok(()) => tr(
+                "hotkeys.selection_note",
+                "With this on, the force-switch key converts whatever you have \
+                 selected when there is no just-typed word to fix. It copies the \
+                 selection to read it, then puts your clipboard back.",
+            )
+            .to_owned(),
+            Err(why) => tr_args(
+                "hotkeys.selection_unavailable",
+                "Not available here — {}.",
+                &[why],
+            ),
         };
         Column::new()
             .spacing(4)
@@ -421,13 +449,16 @@ impl SettingsApp {
         let mut col = Column::new().spacing(14).push(pane_header(
             b,
             tr("commands.commands", "Commands"),
-            "Type a short token, get a phrase — like classic snippet expanders. \
-             For example: typing the trigger `anrl` + space expands into \
-             `Anatomical Reference List `. The engine watches every word \
-             boundary and fires when the typed token matches. Pause / \
-             switch-last live separately on the Hotkeys pane. New commands \
-             take effect after Save + restart."
-                .to_owned(),
+            tr(
+                "commands.subtitle",
+                "Type a short token, get a phrase — like classic snippet expanders. \
+                 For example: typing the trigger `anrl` + space expands into \
+                 `Anatomical Reference List `. The engine watches every word \
+                 boundary and fires when the typed token matches. Pause / \
+                 switch-last live separately on the Hotkeys pane. New commands \
+                 take effect after Save + restart.",
+            )
+            .to_owned(),
         ));
 
         // ── Existing commands list ──────────────────────────────────
@@ -492,13 +523,16 @@ impl SettingsApp {
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(label("Name"))
+                .push(label(tr("commands.field_name", "Name")))
                 .push(
-                    TextInput::new("e.g. Insert email signature", &self.command_draft_name)
-                        .on_input(Message::CommandDraftNameChanged)
-                        .style(theme::input)
-                        .size(13)
-                        .width(Length::FillPortion(4)),
+                    TextInput::new(
+                        tr("commands.name_example", "e.g. Insert email signature"),
+                        &self.command_draft_name,
+                    )
+                    .on_input(Message::CommandDraftNameChanged)
+                    .style(theme::input)
+                    .size(13)
+                    .width(Length::FillPortion(4)),
                 ),
         );
 
@@ -508,13 +542,16 @@ impl SettingsApp {
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(label("Trigger"))
+                .push(label(tr("commands.field_trigger", "Trigger")))
                 .push(
-                    TextInput::new("e.g. anrl, ;sig, ((en))", &self.command_draft_trigger)
-                        .on_input(Message::CommandDraftTriggerChanged)
-                        .style(theme::input)
-                        .size(13)
-                        .width(Length::FillPortion(4)),
+                    TextInput::new(
+                        tr("commands.trigger_example", "e.g. anrl, ;sig, ((en))"),
+                        &self.command_draft_trigger,
+                    )
+                    .on_input(Message::CommandDraftTriggerChanged)
+                    .style(theme::input)
+                    .size(13)
+                    .width(Length::FillPortion(4)),
                 ),
         );
 
@@ -534,7 +571,7 @@ impl SettingsApp {
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(label("Action"))
+                .push(label(tr("commands.field_action", "Action")))
                 .push(
                     Row::new()
                         .spacing(6)
@@ -550,9 +587,9 @@ impl SettingsApp {
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(label(match self.command_draft_action_kind {
-                    CommandActionKind::TypeText => "Text",
-                    CommandActionKind::SwitchLayout => "Layout id",
-                    CommandActionKind::OpenPath => "Path / URL",
+                    CommandActionKind::TypeText => tr("commands.param_text", "Text"),
+                    CommandActionKind::SwitchLayout => tr("commands.param_layout", "Layout id"),
+                    CommandActionKind::OpenPath => tr("commands.param_path", "Path / URL"),
                 }))
                 .push(
                     TextInput::new(
@@ -570,10 +607,13 @@ impl SettingsApp {
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(label("Apps (optional)"))
+                .push(label(tr("commands.field_apps", "Apps (optional)")))
                 .push(
                     TextInput::new(
-                        "comma-separated, e.g. Code.exe,idea64.exe",
+                        tr(
+                            "commands.apps_example",
+                            "comma-separated, e.g. Code.exe,idea64.exe",
+                        ),
                         &self.command_draft_apps,
                     )
                     .on_input(Message::CommandDraftAppsChanged)
@@ -610,11 +650,14 @@ impl SettingsApp {
         col.push(card(form))
             .push(tip(
                 b,
-                "Tips: pick triggers that don't collide with words you actually type — \
-                 `the` would expand on every English sentence; `;sig` or `((email))` \
-                 are safer. Match is exact and case-sensitive. Leave 'Apps' empty for \
-                 a global command, or list `OUTLOOK.EXE,thunderbird.exe` to scope a \
-                 command (case-insensitive basename match).",
+                tr(
+                    "commands.tip",
+                    "Tips: pick triggers that don't collide with words you actually type — \
+                     `the` would expand on every English sentence; `;sig` or `((email))` \
+                     are safer. Match is exact and case-sensitive. Leave 'Apps' empty for \
+                     a global command, or list `OUTLOOK.EXE,thunderbird.exe` to scope a \
+                     command (case-insensitive basename match).",
+                ),
             ))
             .into()
     }
@@ -624,22 +667,26 @@ impl SettingsApp {
         let mut col = Column::new().spacing(14).push(pane_header(
             b,
             tr("wordlists.wordlists", "Wordlists"),
-            "Add language-specific words to the per-layout dictionary \
-             overlay. Use the Save button below to persist your edits, \
-             or just close the window — either way, the engine's \
-             dictionary set refreshes so new words start counting \
-             toward detection on the next typed word, no tray \
-             restart needed."
-                .to_owned(),
+            tr(
+                "wordlists.subtitle",
+                "Add language-specific words to the per-layout dictionary \
+                 overlay. Use the Save button below to persist your edits, \
+                 or just close the window — either way, the engine's \
+                 dictionary set refreshes so new words start counting \
+                 toward detection on the next typed word, no tray \
+                 restart needed.",
+            )
+            .to_owned(),
         ));
 
         if self.os_layouts.is_empty() {
             return col
                 .push(card(
-                    Text::new(
+                    Text::new(tr(
+                        "ui.no_os_layouts",
                         "No OS layouts detected. Add languages in your system's \
                          keyboard settings, then reopen this window.",
-                    )
+                    ))
                     .size(13)
                     .color(b.muted),
                 ))
@@ -676,8 +723,9 @@ impl SettingsApp {
             let mut profile_row = Row::new()
                 .spacing(6)
                 .align_y(Alignment::Center)
-                .push(picker_label("Profile"));
-            profile_row = profile_row.push(profile_btn("", "Global"));
+                .push(picker_label(tr("wordlists.picker_profile", "Profile")));
+            profile_row =
+                profile_row.push(profile_btn("", tr("wordlists.profile_global", "Global")));
             for p in &self.settings.wordlists.profiles {
                 let pick_label = if p.name.is_empty() {
                     p.id.clone()
@@ -693,7 +741,7 @@ impl SettingsApp {
         let mut layout_row = Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
-            .push(picker_label("Layout"));
+            .push(picker_label(tr("wordlists.picker_layout", "Layout")));
         for id in &self.os_layouts {
             layout_row = layout_row.push(
                 Button::new(Text::new(id.as_str().to_string()).size(12))
@@ -726,7 +774,7 @@ impl SettingsApp {
             Row::new()
                 .spacing(6)
                 .align_y(Alignment::Center)
-                .push(picker_label("List"))
+                .push(picker_label(tr("wordlists.picker_list", "List")))
                 .push(kind_button(WordlistKind::Extras))
                 .push(kind_button(WordlistKind::Stop)),
         );
@@ -738,10 +786,14 @@ impl SettingsApp {
             let path_label =
                 match resolve_overlay_path(&self.wordlist_profile, id, self.wordlist_kind) {
                     Some(p) => p.display().to_string(),
-                    None => "(no config dir resolved on this platform)".to_owned(),
+                    None => tr(
+                        "wordlists.no_config_dir",
+                        "(no config dir resolved on this platform)",
+                    )
+                    .to_owned(),
                 };
             col = col.push(
-                Text::new(format!("File: {path_label}"))
+                Text::new(tr_args("wordlists.file_line", "File: {}", &[&path_label]))
                     .size(11)
                     .font(Font::MONOSPACE)
                     .color(b.muted),
@@ -756,7 +808,10 @@ impl SettingsApp {
                 .padding(10)
                 .font(Font::MONOSPACE)
                 .style(theme::editor)
-                .placeholder("# one word per line — '#' starts a comment\n")
+                .placeholder(tr(
+                    "wordlists.editor_placeholder",
+                    "# one word per line — '#' starts a comment\n",
+                ))
                 .into()
         } else {
             Text::new(tr(
@@ -798,10 +853,13 @@ impl SettingsApp {
 
         col.push(tip(
             b,
-            "Tip: Extras helps detection prefer your jargon, \
-             project nouns or family names. Stop list extends the \
-             1- / 2-letter entries the detector accepts as real \
-             words instead of typos.",
+            tr(
+                "wordlists.tip",
+                "Tip: Extras helps detection prefer your jargon, \
+                 project nouns or family names. Stop list extends the \
+                 1- / 2-letter entries the detector accepts as real \
+                 words instead of typos.",
+            ),
         ))
         .into()
     }
@@ -811,11 +869,14 @@ impl SettingsApp {
         let col = Column::new().spacing(14).push(pane_header(
             b,
             tr("exceptions.exceptions", "Exceptions"),
-            "PolterType skips auto-correction when the foreground app's \
-             executable basename is in this list. Manual switch (the \
-             hotkey on the Hotkeys pane) bypasses the list — devs can \
-             still fix wrong-layout identifiers explicitly inside an IDE."
-                .to_owned(),
+            tr(
+                "exceptions.subtitle",
+                "PolterType skips auto-correction when the foreground app's \
+                 executable basename is in this list. Manual switch (the \
+                 hotkey on the Hotkeys pane) bypasses the list — devs can \
+                 still fix wrong-layout identifiers explicitly inside an IDE.",
+            )
+            .to_owned(),
         ));
 
         let mut rows = Column::new().spacing(8);
@@ -860,12 +921,15 @@ impl SettingsApp {
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .push(
-                        TextInput::new("e.g. mygame.exe", &self.exception_draft)
-                            .on_input(Message::ExceptionDraftChanged)
-                            .on_submit(Message::ExceptionAdd)
-                            .style(theme::input)
-                            .size(13)
-                            .width(Length::Fill),
+                        TextInput::new(
+                            tr("exceptions.example", "e.g. mygame.exe"),
+                            &self.exception_draft,
+                        )
+                        .on_input(Message::ExceptionDraftChanged)
+                        .on_submit(Message::ExceptionAdd)
+                        .style(theme::input)
+                        .size(13)
+                        .width(Length::Fill),
                     )
                     .push(
                         Button::new(Text::new(tr("exceptions.add", "Add")).size(13))
@@ -881,8 +945,11 @@ impl SettingsApp {
             )
             .push(tip(
                 b,
-                "Match is case-insensitive against the basename — both \
-                 `code.exe` and `Code.exe` work.",
+                tr(
+                    "exceptions.tip",
+                    "Match is case-insensitive against the basename — both \
+                     `code.exe` and `Code.exe` work.",
+                ),
             ))
             .into()
     }
@@ -905,6 +972,26 @@ impl SettingsApp {
                 Button::new(Text::new(label).size(12))
                     .on_press(Message::ManualOnlyChosen(manual))
                     .style(theme::chip(g.paused == manual))
+                    .padding(Padding {
+                        top: 5.0,
+                        right: 12.0,
+                        bottom: 5.0,
+                        left: 12.0,
+                    }),
+            );
+        }
+
+        let speed_choice = ReplaySpeed::from_config(&e.replay_speed);
+        let mut speed_row = Row::new().spacing(6);
+        for (choice, label) in [
+            (ReplaySpeed::Normal, tr("general.speed_normal", "Normal")),
+            (ReplaySpeed::Fast, tr("general.speed_fast", "Fast")),
+            (ReplaySpeed::Instant, tr("general.speed_instant", "Instant")),
+        ] {
+            speed_row = speed_row.push(
+                Button::new(Text::new(label).size(12))
+                    .on_press(Message::ReplaySpeedChanged(choice))
+                    .style(theme::chip(speed_choice == choice))
                     .padding(Padding {
                         top: 5.0,
                         right: 12.0,
@@ -971,7 +1058,7 @@ impl SettingsApp {
                     .align_y(Alignment::Center)
                     .push(Text::new(tr("general.idle_timeout_ms", "Idle timeout (ms):")).size(13))
                     .push(
-                        Button::new(Text::new(tr("general.text", "-100")).size(12))
+                        Button::new(Text::new("-100").size(12))
                             .on_press(Message::IdleTimeoutDelta(-100))
                             .style(theme::secondary)
                             .padding(Padding {
@@ -987,7 +1074,7 @@ impl SettingsApp {
                             .font(Font::MONOSPACE),
                     )
                     .push(
-                        Button::new(Text::new(tr("general.text2", "+100")).size(12))
+                        Button::new(Text::new("+100").size(12))
                             .on_press(Message::IdleTimeoutDelta(100))
                             .style(theme::secondary)
                             .padding(Padding {
@@ -1005,6 +1092,20 @@ impl SettingsApp {
                         .size(11)
                         .color(b.muted),
                     ),
+            )
+            .push(Text::new(tr("general.replay_speed", "Replacement speed")).size(12))
+            .push(speed_row)
+            .push(
+                Text::new(tr(
+                    "general.replay_speed_hint",
+                    "How quickly a correction happens — both the pauses between \
+                     keystrokes and the waits around the layout switch. Normal is paced \
+                     for input remappers such as keyd, which drop keystrokes sent \
+                     faster; try a faster setting and go back if letters start going \
+                     missing. Applies to the next correction.",
+                ))
+                .size(11)
+                .color(b.muted),
             );
 
         // Applies instantly; persisted by the footer Save.
@@ -1028,6 +1129,7 @@ impl SettingsApp {
         let mut tray_row = Row::new().spacing(6);
         for (choice, label) in [
             (TrayIconStyle::Color, tr("general.tray_color", "Colour")),
+            (TrayIconStyle::Flag, tr("general.tray_flag", "Flag")),
             (TrayIconStyle::Mono, tr("general.tray_mono", "Mono")),
             (TrayIconStyle::Hidden, tr("general.tray_hidden", "Hidden")),
         ] {
@@ -1044,9 +1146,75 @@ impl SettingsApp {
             );
         }
 
-        let appearance = Column::new()
+        // Offers what is on disk, not what was compiled in: a
+        // translation dropped into the config directory — or one a
+        // plug-in brought with it — is selectable without anybody
+        // editing `config.toml` by hand.
+        let mut languages: Vec<(String, String)> = vec![(
+            tr("general.language_system", "System").to_owned(),
+            "system".to_owned(),
+        )];
+        languages.extend(
+            self.ui_languages
+                .iter()
+                .map(|(code, name)| (language_label(code, name), code.clone())),
+        );
+        let current = self.settings.general.ui_language.trim();
+        let automatic = current.is_empty()
+            || current.eq_ignore_ascii_case("system")
+            || current.eq_ignore_ascii_case("auto");
+        let chosen_language = languages
+            .iter()
+            .find(|(_, code)| {
+                if automatic {
+                    code == "system"
+                } else {
+                    code.eq_ignore_ascii_case(current)
+                }
+            })
+            .map(|(label, _)| label.clone())
+            // A code with no catalog on this machine is still what the
+            // file says, so it is shown rather than silently replaced
+            // by "System".
+            .or_else(|| (!automatic).then(|| current.to_owned()));
+        let language_pairs = languages.clone();
+        let language_row = PickList::new(
+            languages
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>(),
+            chosen_language,
+            move |picked| {
+                let code = language_pairs
+                    .iter()
+                    .find(|(label, _)| *label == picked)
+                    .map(|(_, code)| code.clone())
+                    .unwrap_or(picked);
+                Message::UiLanguageChanged(code)
+            },
+        )
+        .text_size(12)
+        .width(Length::Fixed(260.0));
+
+        let mut appearance = Column::new()
             .spacing(12)
             .push(section_title(b, tr("general.appearance", "Appearance")))
+            .push(Text::new(tr("general.interface_language", "Interface language")).size(12))
+            .push(language_row)
+            .push(
+                Text::new(tr(
+                    "general.interface_language_hint",
+                    "Applies as you pick it; the tray menu follows once you save. Anything \
+                     not translated stays English, and a plug-in can bring a language of \
+                     its own.",
+                ))
+                .size(11)
+                .color(b.muted),
+            );
+        if let Some(trouble) = language_trouble() {
+            appearance = appearance.push(Text::new(trouble).size(11).color(b.warn));
+        }
+        let appearance = appearance
             .push(Text::new(tr("general.theme", "Theme")).size(12))
             .push(theme_row)
             .push(
@@ -1062,9 +1230,10 @@ impl SettingsApp {
             .push(
                 Text::new(tr(
                     "general.tray_icon_hint",
-                    "Colour gives every layout its own; Mono keeps one neutral badge. \
-                     Hidden removes the icon and its menu — reopen this window by \
-                     running poltertype --settings.",
+                    "Colour gives every layout its own; Flag draws its country, and \
+                     falls back to Colour where there is no drawing for one; Mono \
+                     keeps one neutral badge. Hidden removes the icon and its menu — \
+                     reopen this window by running poltertype --settings.",
                 ))
                 .size(11)
                 .color(b.muted),
@@ -1120,13 +1289,14 @@ impl SettingsApp {
             )
             .push(interval_row)
             .push(
-                Text::new(
+                Text::new(tr(
+                    "general.updates_disclosure",
                     "This is the only network connection PolterType makes. It fetches a small \
                      version file from GitHub — no account, no identifier, nothing about you or \
                      what you type. A new version is downloaded, checksum-verified and then left \
                      alone until you quit or click \"Restart to update\" in the tray. Never \
                      installed while you're typing.",
-                )
+                ))
                 .size(11)
                 .color(b.muted),
             )
@@ -1150,10 +1320,22 @@ impl SettingsApp {
             .push(
                 Row::new()
                     .spacing(8)
-                    .push(folder_button("Open config.toml", Message::OpenConfigFile))
-                    .push(folder_button("Logs", Message::OpenLogsDir))
-                    .push(folder_button("User wordlists", Message::OpenWordlistsDir))
-                    .push(folder_button("User layouts", Message::OpenLayoutsDir)),
+                    .push(folder_button(
+                        tr("general.open_config", "Open config.toml"),
+                        Message::OpenConfigFile,
+                    ))
+                    .push(folder_button(
+                        tr("general.open_logs", "Logs"),
+                        Message::OpenLogsDir,
+                    ))
+                    .push(folder_button(
+                        tr("general.open_wordlists", "User wordlists"),
+                        Message::OpenWordlistsDir,
+                    ))
+                    .push(folder_button(
+                        tr("general.open_layouts", "User layouts"),
+                        Message::OpenLayoutsDir,
+                    )),
             );
 
         Column::new()
@@ -1161,7 +1343,11 @@ impl SettingsApp {
             .push(pane_header(
                 b,
                 tr("general.general", "General"),
-                "Behaviour of the tray app and the correction engine.".to_owned(),
+                tr(
+                    "general.subtitle",
+                    "Behaviour of the tray app and the correction engine.",
+                )
+                .to_owned(),
             ))
             .push(card(behaviour))
             .push(card(appearance))
@@ -1238,6 +1424,19 @@ impl SettingsApp {
                 .color(b.muted),
             );
 
+        // A Checkbox with no `on_toggle` renders disabled, which is the
+        // right signal while the tooltip itself is off: there is then
+        // nothing to anchor anywhere.
+        let mut anchor_checkbox = Checkbox::new(s.caret_anchor && s.enabled)
+            .label(tr(
+                "suggestions.caret_anchor",
+                "Place the tooltip at the text cursor",
+            ))
+            .text_size(13);
+        if s.enabled {
+            anchor_checkbox = anchor_checkbox.on_toggle(Message::SuggestionCaretAnchorToggled);
+        }
+
         let tooltip_card = Column::new()
             .spacing(12)
             .push(section_title(b, tr("suggestions.tooltip", "Tooltip")))
@@ -1251,13 +1450,29 @@ impl SettingsApp {
                     .on_toggle(Message::SuggestionsToggled),
             )
             .push(max_row)
-            .push(timeout_row);
+            .push(timeout_row)
+            .push(anchor_checkbox)
+            .push(
+                Text::new(tr(
+                    "suggestions.caret_anchor_hint",
+                    "Linux only, and it reaches outside PolterType: the cursor's position \
+                     comes from the accessibility bus, and an application that joins that bus \
+                     is what makes Qt ones — Telegram among them — announce that a screen \
+                     reader is running. Off, the tooltip sits at the window instead. Takes \
+                     effect on restart.",
+                ))
+                .size(11)
+                .color(b.muted),
+            );
 
         // A `TextInput` without `on_input` renders disabled.
-        let mut modifiers_input = TextInput::new("e.g. Ctrl+Shift", &s.accept_modifiers)
-            .style(theme::input)
-            .size(13)
-            .width(Length::Fixed(180.0));
+        let mut modifiers_input = TextInput::new(
+            tr("suggestions.modifiers_example", "e.g. Ctrl+Shift"),
+            &s.accept_modifiers,
+        )
+        .style(theme::input)
+        .size(13)
+        .width(Length::Fixed(180.0));
         if s.enabled {
             modifiers_input = modifiers_input.on_input(Message::SuggestionModifiersChanged);
         }
@@ -1282,10 +1497,11 @@ impl SettingsApp {
                     .push(modifiers_input),
             )
             .push(
-                Text::new(format!(
+                Text::new(tr_args(
+                    "suggestions.modifiers_hint",
                     "'+'-separated: {} — e.g. Ctrl+Shift. Applied with \
                      digit keys 1–9. Leave empty to disable keyboard accept.",
-                    named_key_list(&["Ctrl", "Shift", "Alt", "Meta"], ", ")
+                    &[&named_key_list(&["Ctrl", "Shift", "Alt", "Meta"], ", ")],
                 ))
                 .size(11)
                 .color(b.muted),
@@ -1298,10 +1514,11 @@ impl SettingsApp {
             && !accept_modifiers_enable_keyboard(&s.accept_modifiers)
         {
             chord_card = chord_card.push(
-                Text::new(format!(
+                Text::new(tr_args(
+                    "suggestions.modifiers_required",
                     "At least one of {} is required — as written, keyboard \
                      accept is off (clicking a suggestion still works).",
-                    named_key_list(&["Ctrl", "Alt", "Meta"], " / ")
+                    &[&named_key_list(&["Ctrl", "Alt", "Meta"], " / ")],
                 ))
                 .size(11)
                 .color(b.warn),
@@ -1313,18 +1530,24 @@ impl SettingsApp {
             .push(pane_header(
                 b,
                 tr("suggestions.suggestions", "Suggestions"),
-                "Offer dictionary suggestions in a small tooltip when a typed word looks \
-                 misspelled. Clicking a suggestion (or pressing the accept chord + a digit) \
-                 replaces the word."
-                    .to_owned(),
+                tr(
+                    "suggestions.subtitle",
+                    "Offer dictionary suggestions in a small tooltip when a typed word \
+                     looks misspelled. Clicking a suggestion (or pressing the accept \
+                     chord + a digit) replaces the word.",
+                )
+                .to_owned(),
             ))
             .push(card(tooltip_card))
             .push(card(chord_card))
             .push(tip(
                 b,
-                "Tip: suggestions come from the same bundled dictionaries the detector \
-                 already uses. Everything is computed locally — nothing you type leaves \
-                 your machine.",
+                tr(
+                    "suggestions.tip",
+                    "Tip: suggestions come from the same bundled dictionaries the detector \
+                     already uses. Everything is computed locally — nothing you type leaves \
+                     your machine.",
+                ),
             ))
             .into()
     }
@@ -1346,9 +1569,13 @@ impl SettingsApp {
                     .color(b.ink),
             )
             .push(
-                Text::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
-                    .size(12)
-                    .color(b.muted),
+                Text::new(tr_args(
+                    "about.version",
+                    "Version {}",
+                    &[env!("CARGO_PKG_VERSION")],
+                ))
+                .size(12)
+                .color(b.muted),
             )
             .push(
                 Text::new(tr(
@@ -1362,7 +1589,10 @@ impl SettingsApp {
                     .spacing(4)
                     .push(link_button("poltertype.com", SITE_URL))
                     .push(link_button("GitHub", REPO_URL))
-                    .push(link_button("Report an issue", ISSUES_URL)),
+                    .push(link_button(
+                        tr("about.report_an_issue", "Report an issue"),
+                        ISSUES_URL,
+                    )),
             )
             .push(Space::new().height(6));
 
@@ -1406,10 +1636,14 @@ impl SettingsApp {
                     ),
             )
             .push(
-                Text::new(format!("Config: {}", self.config_path.display()))
-                    .size(11)
-                    .font(Font::MONOSPACE)
-                    .color(b.muted),
+                Text::new(tr_args(
+                    "about.config_line",
+                    "Config: {}",
+                    &[&self.config_path.display().to_string()],
+                ))
+                .size(11)
+                .font(Font::MONOSPACE)
+                .color(b.muted),
             );
 
         Column::new()
@@ -1507,6 +1741,45 @@ pub(super) fn section_title(
         .into()
 }
 
+/// How one language is named in the picker. A locale nobody has a name
+/// for is offered under its bare code — the file works, so hiding it
+/// would be the worse answer.
+fn language_label(code: &str, name: &str) -> String {
+    if name == code {
+        code.to_owned()
+    } else {
+        format!("{name} ({code})")
+    }
+}
+
+/// What to say under the picker when the catalogs did not come out the
+/// way the files promised.
+///
+/// Silence is the normal answer, and the one this returns for a
+/// language that simply has no file: that is a translation nobody
+/// wrote, not one that failed. The two cases worth a line are a file
+/// that was found and could not be fully read, and a language that was
+/// asked for and produced nothing — because from the outside those
+/// look identical to a translation that works, and the only account of
+/// either was a log line nobody has a reason to read (#64).
+fn language_trouble() -> Option<String> {
+    let catalog = poltertype_core::i18n::active_catalog()?;
+    if let Some(problem) = catalog.problems().first() {
+        return Some(tr_args(
+            "general.language_partly_read",
+            "Part of this translation could not be read — {}",
+            &[problem],
+        ));
+    }
+    (catalog.is_empty() && !catalog.locale().starts_with("en")).then(|| {
+        tr_args(
+            "general.language_not_found",
+            "No catalog found for {}, so the interface stays in English.",
+            &[catalog.locale()],
+        )
+    })
+}
+
 /// Sidebar label for the Setup pane. Carries the warning glyph only
 /// while something is actually unresolved — a permanent ⚠ in the nav
 /// is a warning nobody reads by the second day.
@@ -1514,9 +1787,9 @@ fn setup_nav_label(needs_attention: bool) -> &'static str {
     // ASCII on purpose: the bundled font has no ⚠ and draws a tofu
     // box, which reads as a rendering bug rather than as a warning.
     if needs_attention {
-        "Setup  (!)"
+        tr("nav.setup_attention", "Setup  (!)")
     } else {
-        "Setup"
+        tr("nav.setup", "Setup")
     }
 }
 
@@ -1571,7 +1844,7 @@ fn hotkey_chips(b: &'static theme::BrandPalette, combo: &str) -> Element<'static
     let mut row = Row::new().spacing(4).align_y(Alignment::Center);
     for (i, part) in combo.split('+').enumerate() {
         if i > 0 {
-            row = row.push(Text::new(tr("footer.text", "+")).size(11).color(b.muted));
+            row = row.push(Text::new("+").size(11).color(b.muted));
         }
         row = row.push(keycap_chip(display_key_token(part)));
     }

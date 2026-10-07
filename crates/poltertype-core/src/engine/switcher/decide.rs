@@ -1,6 +1,8 @@
 //! Per-completed-word decision: candidate filtering, smart-command
 //! lookup, the pre-decision filters, and the detector pipeline.
 
+use std::time::Instant;
+
 use crossbeam_channel::Receiver;
 use poltertype_detect::{Verdict, letters_only_lower, looks_like_code_token};
 use poltertype_input::{KeyEvent, ReplayKey};
@@ -50,11 +52,15 @@ impl SwitcherEngine {
     /// before any space is involved. Measured on KDE Plasma Wayland
     /// against 0.19.0 (issues #34, #32).
     ///
-    /// `None` on a poisoned buffer: the caret is somewhere we did not
-    /// see it move to, and a correction there would eat whatever is
-    /// actually under it.
+    /// `None` while an unrecorded remainder sits at the caret: these
+    /// keys then continue a word already on screen, and converting
+    /// only them would split it across two layouts. A taint left by an
+    /// interruption the caret has since *moved away from* is not that
+    /// — see
+    /// [`WordBuffer::remainder_at_caret`](crate::engine::buffer::WordBuffer::remainder_at_caret).
     pub(super) fn word_in_progress(&self, buffer: &WordBuffer) -> Option<LastWord> {
-        if buffer.poisoned() {
+        self.settle_word_layout();
+        if buffer.remainder_at_caret() {
             // Its own line: lumped in with the empty-buffer case, a
             // decline here reads in a log exactly like a hotkey that
             // never fired (issue #44).
@@ -98,6 +104,7 @@ impl SwitcherEngine {
         }
         // No global min_word_length gate: each detector decides for
         // itself.
+        self.settle_word_layout();
 
         let current_layout = match self.layout_switcher.current() {
             Ok(l) => l,
@@ -200,6 +207,21 @@ impl SwitcherEngine {
         // reaching for it (issue #36).
         if *self.paused.read() {
             debug!("paused — word stashed for the manual hotkey, no automatic decision");
+            return;
+        }
+
+        // The paste guard reads the same way, and used to sit one step
+        // higher — skipping this whole function, stash included. What it
+        // guards against is us *retyping* text the user pasted, and
+        // retyping is the automatic pass; a word finished inside its
+        // window was simply never stashed, so the hotkey a person
+        // reaches for precisely because the automatic pass stayed quiet
+        // found nothing to act on. Dead for a second after every paste,
+        // which is the second in which people type (issue #72).
+        if Instant::now() < *self.paste_guard_until.read() {
+            debug!(
+                "paste guard active — word stashed for the manual hotkey, no automatic decision"
+            );
             return;
         }
 

@@ -22,8 +22,9 @@ use std::time::Duration;
 
 use crate::focus::{CaretHint, FocusTracker};
 
-use super::atspi_caret::{AtspiCaretWatcher, CaretSample};
+use super::atspi_caret::AtspiCaretWatcher;
 use super::atspi_focus::AtspiFocusWatcher;
+use super::types::CaretSample;
 
 /// How long a focus observation stays trustworthy.
 ///
@@ -35,13 +36,16 @@ use super::atspi_focus::AtspiFocusWatcher;
 const FOCUS_MAX_AGE: Duration = Duration::from_secs(300);
 
 pub(crate) struct CaretOnlyFocusTracker {
-    caret: Arc<AtspiCaretWatcher>,
+    /// `None` when the caret half was not asked for — the tooltip then
+    /// anchors to the window, and this tracker exists purely for
+    /// `focused_exe`, which is what `disabled_apps` needs.
+    caret: Option<Arc<AtspiCaretWatcher>>,
     focus: Option<Arc<AtspiFocusWatcher>>,
 }
 
 impl CaretOnlyFocusTracker {
     pub(crate) fn new(
-        caret: Arc<AtspiCaretWatcher>,
+        caret: Option<Arc<AtspiCaretWatcher>>,
         focus: Option<Arc<AtspiFocusWatcher>>,
     ) -> Self {
         Self { caret, focus }
@@ -61,7 +65,7 @@ impl FocusTracker for CaretOnlyFocusTracker {
     }
 
     fn caret_hint(&self) -> Option<CaretHint> {
-        self.caret.latest().map(CaretSample::into_hint)
+        self.caret.as_ref()?.latest().map(CaretSample::into_hint)
     }
 
     fn backend_name(&self) -> &'static str {

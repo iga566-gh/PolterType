@@ -65,4 +65,7 @@ iced            = { workspace = true }
 # your layout" — gated by `[general].show_notifications` (off by
 # default). Cross-platform: Win10+ Toast, macOS NSUserNotification,
 # Linux Desktop Notifications spec via DBus.
+# Naming the sender before the first toast is macOS-only and lives in
+# `poltertype-shell::notification_sender_ready`, so no `core-foundation`
+# here — this crate holds no platform code.
 notify-rust     = { workspace = true }

@@ -12,13 +12,22 @@ layouts: the things that vary between people live in data.
 
 ## The short version
 
-1. Copy `data/i18n/uk.toml` to `data/i18n/<your-language>.toml`.
+1. Copy any catalog PolterType ships — German, Spanish, French and
+   Ukrainian, in `data/i18n/` here and in `<data_dir>/i18n/` in an
+   installed copy — to
+   `<config-dir>/poltertype/i18n/<your-language>.toml`.
 2. Translate the right-hand side of each line.
-3. Set `[general].ui_language` in `config.toml` to your language code
-   and reopen the window.
+3. Pick your language under **General → Appearance → Interface
+   language**. The window changes as you pick it; save, and the tray
+   menu follows.
 
-That is the whole loop. To try it without touching the source tree,
-drop the file into `<config-dir>/poltertype/i18n/` instead.
+That is the whole loop, and nothing in it is a build: the picker offers
+whatever it finds on disk, so a file you dropped in yourself is listed
+beside the shipped ones (under its bare code if PolterType has no name
+for that language). `[general].ui_language` in `config.toml` is the
+same setting, if you would rather type it — and the default,
+`"system"`, picks your file up on its own once its name matches the
+locale you already run.
 
 ---
 
@@ -36,20 +45,32 @@ Four rules, each of which exists because breaking it is easy:
 
 * **A missing key is fine.** The English original is compiled into the
   program at every call site, so anything you have not translated
-  stays English. A half-finished file is a useful file — send it.
+  stays English. A half-finished file is a useful file.
 * **An empty value means "not yet".** `"key" = ""` is ignored rather
   than drawn, because a blank button is worse than an English one.
 * **`{}` is a value filled in at run time**, in order. Keep the same
   number as the English unless your language genuinely needs fewer;
   extra ones are left visible rather than crashing anything.
-* **One bad line costs that line**, not your language. A value that
-  isn't a string is skipped with a warning and everything else loads.
+* **One bad line costs that line**, not your language — including a
+  line TOML refuses outright. A value that isn't a string is skipped,
+  and a line that does not parse at all is dropped while the rest of
+  the file is read as usual. The commonest way to write one is a
+  Windows path: `"C:\path"` is not a valid escape and `"C:\\path"`
+  is, which is why the shipped catalogs double every backslash.
+
+  When something was dropped, the Settings window says so under the
+  language picker, naming the file and the line — that line is the
+  only place this is visible, since the log it is also written to is
+  not somewhere a translator has any reason to look.
 
 ### What not to translate
 
 * **PolterType.** The product name is the same in every language.
 * **Layout ids** (`en-US`, `uk-UA`), config keys, file names and
-  paths — they are things the user types, not things they read.
+  paths — they are things the user types, not things they read. An
+  *example* of one is the other way round: `commands.placeholder_layout`
+  is the greyed `en-US` under the layout box, and a Ukrainian catalog
+  is right to make that `uk-UA`.
 * **Keycap names** in hotkey chips (`Ctrl`, `Alt`, `Shift`) unless
   your platform genuinely labels them differently.
 
@@ -76,25 +97,154 @@ A regional code falls back to the bare language: `uk_UA` finds
 `pt_BR.toml` alongside `pt.toml` earns its place, `en_GB.toml` for one
 word probably does not.
 
-Files are looked up in `<data_dir>/i18n/` (shipped with the app) and
-`<config-dir>/poltertype/i18n/` (yours). Yours wins, which is what
-makes the edit-and-reopen loop possible.
+Three kinds of directory are read, in this order, and the last one to
+name a key wins:
+
+1. `<data_dir>/i18n/` — what the app ships.
+2. `<data_dir>/plugins/<id>/i18n/` — what each installed plug-in ships
+   (see the next section).
+3. `<config-dir>/poltertype/i18n/` — yours.
+
+Yours winning is what makes the edit-and-reload loop possible: the
+footer's **Reload** re-reads all three, so an edited catalog shows
+without reopening the window.
 
 ---
 
-## Getting it upstream
+## Translating a guide the window links to
 
-Open a PR with the one file. Two things make it easy to review:
+The Setup pane has a button that opens
+[PERMISSIONS.md](PERMISSIONS.md) — an English page behind a button in
+a window that is not. A translated guide is a file beside the English
+one, named for its language:
 
-* **Say which strings you were unsure about.** Several are terms of
-  art — "identifier guard", "plausibility", "stop words" — and a
-  translator's note is more useful than a confident wrong guess.
-* **Keep the section comments** from `uk.toml`. They group the file by
-  pane, which is how the next person will read it.
+```
+docs/PERMISSIONS.uk.md
+```
 
-If a string reads awkwardly because the English is awkward, say so.
-Fixing the English is usually the better patch, and it improves every
-other language at the same time.
+plus one line in your catalog saying it is there:
+
+```toml
+"docs.permissions" = "uk"
+```
+
+That value is a **language tag, not a file name**: PolterType builds
+`PERMISSIONS.uk.md` out of it and opens that instead. Anything that is
+not a language tag is ignored and the button stays on the English
+page — the address is assembled inside the program, so a catalog can
+send a link to another translation but never to another site.
+
+Nothing probes for the file. PolterType makes exactly one network call
+and it is the updater, so the line in your catalog *is* the answer to
+"does this exist?" — which is why the two belong in the same pull
+request: the translated guide, and the line that points at it.
+
+Only guides something in the window opens are listed, which today is
+`PERMISSIONS.md`. A translation is held to the same standard as the
+English one: a page that no longer matches what the program does is
+worse than no page, so a translation that falls behind gets updated or
+dropped rather than left to mislead.
+
+---
+
+## Translating a plug-in
+
+A plug-in's settings pane and its tray entries are drawn by PolterType
+but **worded by the plug-in**: their labels, explanations and options
+come out of its `manifest.toml`. So a plug-in carries its own catalog,
+in its own directory:
+
+```
+<data_dir>/plugins/<id>/i18n/<lang>.toml
+```
+
+Ask the plug-in for the file to start from — no key has to be guessed:
+
+```console
+$ poltertype --plugin-strings <id>
+"summary" = "Answers your chats"
+"pane.act.mode.label" = "Mode"
+"pane.act.mode.option.auto" = "Automatic"
+"pane.schedule.sends.field.room.label" = "Room"
+```
+
+Keys are derived from the manifest's own structure — a control's config
+key (`act.mode`), or the command it runs, or a slug of its English label
+for a tray entry or a section, which bind to neither. Translate the
+right-hand side, save as `i18n/uk.toml` next to the manifest and press
+**Reload** (the plug-in's *tray* entries are read when PolterType next
+starts).
+
+Four things worth knowing:
+
+* **A plug-in's catalog is confined to its own pane.** Whatever the file
+  says, every key lands under `plugin.<id>.`; a plug-in cannot reword
+  PolterType's own buttons. Writing the prefix out yourself is allowed
+  and changes nothing.
+* **It works for a language PolterType has never been translated into.**
+  The catalogs are independent: pick `pl` — the picker lists it because
+  the plug-in's `pl.toml` is on disk — and that plug-in is in Polish
+  while the window around it stays English. Nothing has to be added to
+  the app first.
+* **Values are never translated.** An option's `value`, a control's key
+  and a command's id are what reach the plug-in's config file and its
+  program; only what is *read* changes. The drop-down shows the label
+  and writes the value.
+* **What the plug-in prints, only the plug-in can translate.** Report
+  text and the rows of a list are produced at run time, so PolterType
+  hands every plug-in process `POLTERTYPE_LOCALE` (`uk`, `pt_BR`, …) and
+  the plug-in decides what to do with it.
+
+A *data pack* — `kind = "pack"`, no program — is the other way round: its
+`i18n/` is a translation of **PolterType itself**, taken as written, so
+a whole language can be distributed as a pack.
+
+The tray menu is translated too, a plug-in's own entries included: the
+tray reads the same catalogs at startup, so a change of language takes
+effect there when PolterType is next started.
+
+The suggestion popup's own action — "Add to dictionary" — comes from
+the catalog as well, so nothing the engine puts on screen while you
+type is left in English.
+
+Three things stay English on purpose. **Error notifications** carry the
+operating system's own message, which is not ours to translate. The
+**Setup pane's step titles** come from the permission probe in
+`poltertype-input`, a crate with no dependency on the translation
+loader; everything the Settings window puts around them — the headline,
+the state badges, the buttons and the notes — is translated. And the
+**plug-in supervisor's failures** ("declares no command", "did not
+answer within 5000ms") name a plug-in's own ids beside an OS error:
+they are read in bug reports more often than by the person who
+clicked.
+
+---
+
+## Which languages ship, and where yours lives
+
+Five: English, plus the German, Spanish, French and Ukrainian
+catalogs. **That set is closed for now** — a language outside it lives
+in `<config-dir>/poltertype/i18n/` rather than in this repository. Two
+reasons, and the first is the one that decides it: a shipped catalog is
+a standing promise, re-checked complete and correct at every release
+against an English original that moves, and the installers are already
+north of 55 MB before any of that.
+
+None of which makes a catalog of your own second class. It is the same
+file the shipped ones are, it wins over them key by key, the picker
+lists it the same way, and it survives updates because your config
+directory is not what an installer replaces. It is also **yours to pass
+around**: send the TOML to anyone who wants it and they drop it in the
+same place — no build, no plug-in, nothing to ask us for.
+
+Two habits worth keeping from the shipped files: note the strings you
+were unsure about somewhere, because several are terms of art
+("identifier guard", "plausibility", "stop words"), and keep the
+section comments from `uk.toml`, which group the file by pane.
+
+What *is* worth a PR is the English. If a string reads awkwardly in
+your language because the English is awkward, say so — fixing the
+English is the better patch and it improves every catalog at once.
 
 ---
 
@@ -120,6 +270,20 @@ tr_args(
     &[&count.to_string()],
 )
 ```
+
+
+A string built **outside** `poltertype-app` needs one more step. The
+Setup pane's rows come from `poltertype-input`, which cannot call `tr`
+at all: `poltertype-core`, where `tr` lives, depends on that crate. So
+a step carries a `SetupText` — the same key and English, resolved by
+the window as it draws:
+
+```rust
+SetupText::new("setup.read_title", "Read the keyboard")
+```
+
+Keys there are `setup.`-prefixed, and `cargo test -p poltertype-input
+setup` fails on one that is reused or outside that namespace.
 
 Then add the key to `data/i18n/uk.toml` — or leave it, and the next
 translator will pick it up. `cargo test -p poltertype-core i18n`

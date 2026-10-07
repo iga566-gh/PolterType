@@ -11,18 +11,9 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::focus::{CaretHint, FocusTracker, FocusedWindowGeometry};
 
-use super::atspi_caret::{AtspiCaretWatcher, CaretSample};
+use super::atspi_caret::AtspiCaretWatcher;
 use super::proc_exe::exe_basename_for_pid;
-
-/// A live display connection plus the two EWMH atoms we query. Built
-/// lazily on the first `focused_exe()` call and dropped whenever the
-/// connection dies (the next call reconnects).
-struct X11FocusConn {
-    conn: RustConnection,
-    root: Window,
-    net_active_window: Atom,
-    net_wm_pid: Atom,
-}
+use super::types::{CaretSample, X11FocusConn};
 
 /// Focus via EWMH: `_NET_ACTIVE_WINDOW` on the root window names the
 /// focused window, `_NET_WM_PID` on that window names its process,

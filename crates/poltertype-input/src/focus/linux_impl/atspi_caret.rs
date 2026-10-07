@@ -28,10 +28,11 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::zvariant::{ObjectPath, Value};
 use zbus::{MatchRule, Message, message};
 
-use crate::focus::CaretHint;
-
-use super::atspi_owner::{CaretOwner, OwnerLookup};
-use super::consts::COORD_TYPE_WINDOW;
+use super::atspi_caret_geometry::{anchor_from_rect, is_caret_shaped, is_degenerate, retry_offset};
+use super::atspi_caret_queries::{caret_offset_property, character_extents, object_extents};
+use super::atspi_owner::OwnerLookup;
+use super::enums::AtspiCaretError;
+use super::types::CaretSample;
 
 /// Per-iterator signal queue. Caret events burst during fast typing
 /// and we only ever serve the newest sample, so a small queue that
@@ -39,54 +40,7 @@ use super::consts::COORD_TYPE_WINDOW;
 const SIGNAL_QUEUE: usize = 32;
 
 /// A `GetCharacterExtents` reply: x, y, width, height.
-type Extents = (i32, i32, i32, i32);
-
-/// One caret-position fix, in coordinates relative to the caret's
-/// toplevel window (see [`COORD_TYPE_WINDOW`] for why not screen).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CaretSample {
-    pub(crate) x: i32,
-    pub(crate) y: i32,
-    pub(crate) height: u32,
-    pub(crate) at: Instant,
-    pub(crate) owner: CaretOwner,
-}
-
-impl CaretSample {
-    /// `age` is computed at read time so the caller can judge staleness
-    /// — an old sample usually means the focused app emits no a11y
-    /// events at all.
-    pub(crate) fn into_hint(self) -> CaretHint {
-        CaretHint {
-            x: self.x,
-            y: self.y,
-            height: self.height,
-            age: self.at.elapsed(),
-            pid: Some(self.owner.pid),
-            window: self.owner.window,
-        }
-    }
-}
-
-/// Why the watcher could not start. Every variant boils down to "no
-/// usable a11y stack in this session" — headless CI, a11y disabled,
-/// no registry daemon — which is why the caller treats construction
-/// failure as a normal, log-once condition.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum AtspiCaretError {
-    #[error("session bus unavailable: {0}")]
-    SessionBus(#[source] zbus::Error),
-    #[error("a11y bus address lookup failed: {0}")]
-    A11yAddress(#[source] zbus::Error),
-    #[error("a11y bus connection failed: {0}")]
-    A11yConnect(#[source] zbus::Error),
-    #[error("caret event registration failed: {0}")]
-    Register(#[source] zbus::Error),
-    #[error("caret signal subscription failed: {0}")]
-    Subscribe(#[source] zbus::Error),
-    #[error("watcher thread spawn failed: {0}")]
-    Spawn(#[source] std::io::Error),
-}
+pub(super) type Extents = (i32, i32, i32, i32);
 
 /// Handle to the background caret watcher. Cheap to share (`Arc` it);
 /// dropping the handle intentionally leaves the thread running — the
@@ -289,109 +243,4 @@ fn resolve_caret_point(
     // every offset returns a zero rect).
     let rect = object_extents(conn, sender, path)?;
     is_caret_shaped(rect).then(|| anchor_from_rect(rect, false))
-}
-
-/// `GetCharacterExtents` on the signal's accessible, in [window
-/// coordinates](COORD_TYPE_WINDOW). Failures (app exited, object
-/// destroyed, interface not implemented) are normal churn — `None`,
-/// logged at debug.
-fn character_extents(
-    conn: &Connection,
-    sender: &str,
-    path: &ObjectPath<'_>,
-    offset: i32,
-) -> Option<Extents> {
-    let reply = conn
-        .call_method(
-            Some(sender),
-            path.clone(),
-            Some("org.a11y.atspi.Text"),
-            "GetCharacterExtents",
-            &(offset, COORD_TYPE_WINDOW),
-        )
-        .map_err(|e| debug!(%e, "AT-SPI caret watcher: GetCharacterExtents failed"))
-        .ok()?;
-    reply.body().deserialize::<Extents>().ok()
-}
-
-/// The accessible's own rectangle, in the same [window
-/// coordinates](COORD_TYPE_WINDOW) as [`character_extents`].
-pub(super) fn object_extents(
-    conn: &Connection,
-    sender: &str,
-    path: &ObjectPath<'_>,
-) -> Option<Extents> {
-    let reply = conn
-        .call_method(
-            Some(sender),
-            path.clone(),
-            Some("org.a11y.atspi.Component"),
-            "GetExtents",
-            &(COORD_TYPE_WINDOW,),
-        )
-        .map_err(|e| debug!(%e, "AT-SPI caret watcher: GetExtents failed"))
-        .ok()?;
-    reply.body().deserialize::<Extents>().ok()
-}
-
-/// The object's current caret offset, via the `CaretOffset` property.
-/// (libatspi's `atspi_text_get_caret_offset` maps to this property —
-/// there is no `GetCaretOffset` *method* on the wire.)
-fn caret_offset_property(conn: &Connection, sender: &str, path: &ObjectPath<'_>) -> Option<i32> {
-    let reply = conn
-        .call_method(
-            Some(sender),
-            path.clone(),
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &("org.a11y.atspi.Text", "CaretOffset"),
-        )
-        .map_err(|e| debug!(%e, "AT-SPI caret watcher: CaretOffset query failed"))
-        .ok()?;
-    match reply.body().deserialize::<Value<'_>>().ok()? {
-        Value::I32(offset) => Some(offset),
-        _ => None,
-    }
-}
-
-/// A rect that names no glyph. Zero-area is the end-of-text caret
-/// position and the answer of objects that cannot measure; the
-/// all-`-1` rect is what Chromium and Electron return for a caret
-/// offset of `-1` ("no caret here"), and it must not be mistaken for
-/// a point one pixel outside the window. (A zero *width* alone is
-/// legitimate — zero-advance combining marks.)
-pub(super) fn is_degenerate((_, _, width, height): Extents) -> bool {
-    width < 0 || height < 0 || (width == 0 && height == 0)
-}
-
-/// Whether a rect is narrow enough to *be* a caret rather than the
-/// field containing one. A text box's left edge would put the tooltip
-/// at the start of the line instead of where the typing is, so only a
-/// box no wider than a character or so may stand in for the caret.
-pub(super) fn is_caret_shaped((_, _, width, height): Extents) -> bool {
-    height > 0 && width >= 0 && width <= 12.max(height.saturating_mul(3) / 2)
-}
-
-/// The offset to retry with when the event offset has no glyph: the
-/// character *before* the caret, if there is one.
-pub(super) fn retry_offset(offset: i32) -> Option<i32> {
-    if offset > 0 { Some(offset - 1) } else { None }
-}
-
-/// Collapse a glyph rect to the tooltip anchor point. `right_edge`
-/// selects the rect's right edge — used when the rect belongs to the
-/// character *before* the caret, whose trailing edge is where the
-/// caret actually is.
-pub(super) fn anchor_from_rect(
-    (x, y, width, height): Extents,
-    right_edge: bool,
-) -> (i32, i32, u32) {
-    let anchor_x = if right_edge {
-        x.saturating_add(width)
-    } else {
-        x
-    };
-    // Toolkits answer sane heights, but the wire type is signed —
-    // clamp instead of trusting.
-    (anchor_x, y, u32::try_from(height.max(0)).unwrap_or(0))
 }

@@ -7,8 +7,13 @@
 //!
 //! Nothing here loads third-party code. A plug-in is a process.
 
+mod consts;
 mod menu;
 mod supervisor;
+mod types;
 
 pub use menu::PluginMenu;
-pub use supervisor::{Departed, Supervisor, read_report, run_command, run_command_for_row_waiting};
+pub use supervisor::{
+    Supervisor, ask_query, query_refusal, read_report, run_command, run_command_for_row_waiting,
+};
+pub use types::Departed;

@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     EmittedKey, InputError, InputListener, KeyDirection, KeyEmitter, KeyEvent, Modifiers,
-    ReplayKey, SwitchChord,
+    ReplayKey, ReplaySpeed, SwitchChord,
 };
 use crossbeam_channel::Sender;
 use evdev::uinput::VirtualDevice;
@@ -13,13 +13,16 @@ use std::collections::HashSet;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
 pub struct UinputEmitter {
     device: parking_lot::Mutex<Option<VirtualDevice>>,
+    /// How much of [`REPLAY_STEP`] to keep between key events.
+    /// Atomic because the setting is re-read from a running emitter.
+    speed: AtomicU8,
     /// Log of every key event actually written to uinput since the
     /// last [`KeyEmitter::take_emitted`]. Behind keyd (and similar
     /// remappers) our events echo back through the evdev listener
@@ -29,9 +32,10 @@ pub struct UinputEmitter {
 }
 
 impl UinputEmitter {
-    pub fn new() -> Self {
+    pub fn new(speed: ReplaySpeed) -> Self {
         let s = Self {
             device: parking_lot::Mutex::new(None),
+            speed: AtomicU8::new(speed.as_u8()),
             emitted: parking_lot::Mutex::new(Vec::new()),
         };
         // Eagerly, because input remappers (keyd with `[ids] *`) grab
@@ -95,7 +99,17 @@ impl UinputEmitter {
     }
 }
 
+impl UinputEmitter {
+    fn speed(&self) -> ReplaySpeed {
+        ReplaySpeed::from_u8(self.speed.load(Ordering::Relaxed))
+    }
+}
+
 impl KeyEmitter for UinputEmitter {
+    fn set_replay_speed(&self, speed: ReplaySpeed) {
+        self.speed.store(speed.as_u8(), Ordering::Relaxed);
+    }
+
     fn send_backspaces(&self, n: usize) -> Result<(), InputError> {
         if n == 0 {
             return Ok(());
@@ -113,7 +127,7 @@ impl KeyEmitter for UinputEmitter {
         // nothing looks exactly like a burst that was never sent, and
         // telling the two apart took a day without this line.
         debug!(count = n, "uinput backspaces starting");
-        let step = Duration::from_millis(4);
+        let step = self.speed().pace(REPLAY_STEP);
         for _ in 0..n {
             emit_one(
                 dev,
@@ -154,11 +168,11 @@ impl KeyEmitter for UinputEmitter {
         // packs them into a single frame with one SYN_REPORT, which
         // libinput treats as a zero-duration tap and drops.
         //
-        // The 4 ms pacing is for remappers proxying our uinput device —
-        // keyd coalesces or discards pairs landing microseconds apart,
-        // most visibly the trailing space. Well below human-noticeable
-        // for a 5-10 keystroke replay.
-        let step = Duration::from_millis(4);
+        // The pacing is for remappers proxying our uinput device — see
+        // `REPLAY_STEP`. The two guards around the boundary key are not
+        // pacing and never scale: they are what makes its press a real
+        // down edge under the user's own finger.
+        let step = self.speed().pace(REPLAY_STEP);
         let last_hold = Duration::from_millis(20);
         let boundary_guard = Duration::from_millis(12);
         let last_idx = keys.len() - 1;

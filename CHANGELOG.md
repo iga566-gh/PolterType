@@ -4,6 +4,662 @@ All notable changes to PolterType are recorded here. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.36.4] — the key that was still down
+
+### Fixed
+
+- **No more lost space after an automatic correction on Linux**
+  ([#74](https://github.com/Just-Code-NET/PolterType/issues/74)). A
+  correction starts at the *press* of the space that finished the word,
+  and a finger stays on that key for a moment. Where the key gate holds
+  the keyboard for the length of the correction — Wayland, whenever no
+  remapper proxies PolterType's own keyboard — the space's release came
+  in during the hold and never reached the compositor. So the compositor
+  went on treating the space as held: the space retyped behind the
+  corrected word was dropped as a second press of a key already down,
+  the next real press was dropped the same way, and it took a third
+  press to get a space at all. The same thing ate the first letter of a
+  following word typed fast.
+
+  A correction now waits for the keys the user is still holding to come
+  up before it takes the keyboard and types — within the same deadline
+  it already waited on for the fingers to settle, so a key that never
+  comes up still cannot stall it.
+
+  Verified on KDE Plasma 6 Wayland with the gate holding, the space held
+  as a finger holds it: 0.36.3 kept both spaces in 1 of 8 rounds with a
+  150 ms press and 0 of 8 with a 300 ms one; this build, 8 of 8 each. A
+  30 ms tap, whose release beats the hold, was fine before and still is.
+
+### Documentation
+
+- `[engine].hold_keys` is Windows and macOS only; on Linux the gate is
+  on whenever the input stack allows it, and `POLTERTYPE_HOLD_KEYS=0` is
+  what turns it off. The setting's own description said otherwise.
+
+## [0.36.3] — the window that was still arriving
+
+### Fixed
+
+- **The manual switch converts a word typed straight after `Alt+Tab`**
+  ([#72](https://github.com/Just-Code-NET/PolterType/issues/72)). On a
+  desktop that keeps a keyboard layout per window — KDE Plasma set to
+  *Window* or *Application*, or anything that restores a window's
+  layout on focus — the new window's layout is applied a moment after
+  the focus moves. PolterType reads each key straight off the keyboard,
+  so the first key of a word typed at once arrives *before* that, and
+  the word was filed under the previous window's layout. The hotkey
+  then "switched" it to the layout already in effect and retyped it
+  unchanged, and the automatic pass, reading the same word against the
+  layout at the space, took it for a switch by hand and left it alone.
+
+  A word that starts after a focus change, a click or a shortcut now
+  has its layout read again, past the cached answer, on each key for
+  its first half second — so it is filed under the layout it was
+  actually typed in. Anywhere else the first key's reading still
+  stands, which is what lets a switch by hand in mid-word be noticed.
+
+  The report's first form — a caption typed into the box Telegram
+  opens for a pasted image — is most likely the same moment, since that
+  box takes the focus too; it was not reproduced here.
+
+  Verified on KDE Plasma 6 Wayland with a layout per window, two
+  windows and `Alt+Tab`, 24 rounds a side: 0.36.2 converted 19 by
+  hotkey and corrected 21 on its own, all of its misses within 150 ms
+  of the switch; this build, 24 and 24.
+
+## [0.36.2] — the panel that arrives late
+
+### Fixed
+
+- **No more crash when the tray host starts after PolterType**
+  ([#73](https://github.com/Just-Code-NET/PolterType/issues/73)). Until
+  something on the bus is willing to draw a StatusNotifierItem, the
+  tray library stands a legacy `GtkStatusIcon` in for it. When a panel
+  or shell finally turns up, the library takes that stand-in away —
+  and leaves one of the four callbacks it had wired to us behind: the
+  one that writes the hover text. Every tooltip written after that
+  went to freed memory, which reads as GTK type-check warnings for as
+  long as the allocation still looks like an object and as a segfault
+  once it has been handed out again. Roughly eleven minutes, in the
+  report.
+
+  PolterType now drops that callback itself, before each tooltip
+  write, and only once the icon it belonged to is gone — a fallback
+  still on screen keeps its hover text. The defect is upstream, in
+  libayatana-appindicator 0.6.0 and in its current master; this is the
+  half of it that can be fixed from here.
+
+  It needs nothing unusual to hit: a systemd user unit, an autostart
+  entry that wins the race against the panel, a shell that restarts.
+  Verified on Hyprland with a tray host brought up deliberately late —
+  0.36.1 segfaults after a handful of tooltip changes, 0.36.2 does not.
+
+## [0.36.1] — the second after a paste
+
+### Fixed
+
+- **The manual switch hotkey works right after a paste**
+  ([#72](https://github.com/Just-Code-NET/PolterType/issues/72)). Pasting
+  arms a one-second window in which PolterType declines to correct
+  anything on its own: what a paste inserts is not typing, and on
+  Wayland a compositor or remapper can replay it through a virtual
+  keyboard, keystroke by keystroke, indistinguishable from a person.
+  That part is deliberate and unchanged. What was not deliberate is
+  that the window also swallowed the *manual* hotkey: the last word is
+  stashed inside the same step the window skipped, so a word finished
+  within a second of a paste was never stashed at all, and the key
+  someone presses precisely because the automatic pass stayed quiet did
+  nothing. It now stops the automatic pass alone — the same place pause
+  stops, and for the same reason (issue #36).
+
+  Verified on Hyprland with keyd, with a real image on the clipboard:
+  paste, type a word, press the hotkey 0.5 s later, and the word
+  converts.
+
+## [0.36.0] — the wait after the hotkey
+
+### Fixed
+
+- **A manual switch no longer waits for an answer that cannot come**
+  ([#71](https://github.com/Just-Code-NET/PolterType/issues/71)). Once the hotkey came up, the engine read the
+  layout back three times across 80 ms before touching any text — the
+  guard against a settings daemon that lets our switch land and puts
+  its own group back a moment later, measured on MATE. But only some
+  backends have a reading independent of their own write. KDE,
+  Hyprland, IBus and Fcitx answer "cannot tell", and on every one of
+  them those 80 ms bought nothing at all. They are now asked once.
+  Measured on Hyprland with keyd, from the trigger key rising to the
+  first key of the correction: **172 ms → 70 ms**; to the last key of
+  it: **320 ms → 217 ms**. MATE's protection is unchanged — a backend
+  that can answer is still sampled across the window.
+
+- **`[engine] replay_speed` takes effect on the next correction, not
+  the next start** ([#67](https://github.com/Just-Code-NET/PolterType/issues/67)). The emitter was built once at
+  startup and kept its pacing, so a faster setting meant restarting the
+  app — which is what the reporter of #67 found after the setting
+  shipped. It is now re-read live, in both the emitter and the engine.
+
+- **The tray tooltip's name and its state are two fields again**
+  ([#59](https://github.com/Just-Code-NET/PolterType/issues/59)). A panel draws the tooltip's title and its body
+  itself, and everything we had went into the title — so the layout,
+  the pause state and the draft count arrived as one long name. The
+  name is now the title and the rest is the body. Linux only: Windows
+  and macOS take a single string and get the same line they always did.
+
+### Changed
+
+- **`replay_speed` covers the whole correction, not only the typing.**
+  The waits between switching the layout and typing against it scale
+  with the setting too, which is what issue #71 asked for. They never
+  scale to *nothing*: a pace waits on a device we own and has guards
+  around it, while a settle waits on another process's clock — and
+  arriving early there does not cost a keystroke, it retypes the whole
+  word in the layout we just left. Measured on the same machine and
+  word, first key **70 / 40 / 25 ms** and whole burst **217 / 144 /
+  82 ms** at `normal` / `fast` / `instant`.
+
+### Added
+
+- **A correction says where its time went**, at debug level: `gear`,
+  `switch_ms`, `absorb_ms`, `verify_ms`, `emit_ms` and `total_ms`,
+  counted from the moment the trigger key comes up. Two issues running
+  have been about that wait, and this is the line a reporter can paste
+  instead of a stopwatch reading. The absorb phase also says when it
+  gave up waiting for the user's fingers to settle, which is the one
+  case that can still cost hundreds of milliseconds — a remapper that
+  never reports a modifier release.
+
+## [0.35.0] — one screen, one tooltip, at your own speed
+
+### Added
+
+- **`[engine] replay_speed` — how fast a correction types itself out**
+  ([#67](https://github.com/Just-Code-NET/PolterType/issues/67)).
+  `normal` (the default, unchanged), `fast` or `instant`, with a picker
+  in Settings → General → Behaviour. The pauses between key events
+  exist for input remappers such as keyd, which drop press/release
+  pairs sent faster than that; on a machine with nothing in the way
+  they are most of what a correction spends. `instant` removes them
+  entirely — on a six-letter word that is most of the burst. The guards
+  around the boundary key are correctness rather than pacing and do not
+  scale at any setting. Linux only in effect: Windows sends a burst in
+  one `SendInput` call and macOS paces against the window server's own
+  echo, so neither has a clock pause to give up.
+
+### Fixed
+
+- **The suggestion tooltip no longer straddles the gap between two
+  monitors** ([#70](https://github.com/Just-Code-NET/PolterType/issues/70)).
+  Where nothing says where the caret is, the tooltip falls back to
+  bottom-centre — and it was centred in the X11 root window, which
+  spans every monitor, so on a two-screen desktop it landed exactly on
+  the seam and was drawn half on each. It now asks RandR for the
+  physical rectangles and centres inside one of them: the monitor the
+  caret or focused window is on where that is known, otherwise the
+  focused X window's, otherwise the pointer's. A caret near the seam
+  keeps its tooltip on its own screen too. Most visible on GNOME, where
+  Mutter implements no layer shell and this X11 backend is the only one
+  available.
+
+- **The AppImage's tray icon has hover text again — on every
+  distribution** ([#59](https://github.com/Just-Code-NET/PolterType/issues/59)).
+  The tooltip landed in 0.32.0 and reached almost nobody: the call that
+  fills the StatusNotifierItem `ToolTip` property arrived in
+  libayatana-appindicator 0.6.0, Debian and Ubuntu still ship 0.5.9x,
+  and the AppImage bundles the copy from the machine that built it —
+  which then wins over whatever the user has installed. The AppImage
+  build now builds 0.6.0 from source and bundles that instead whenever
+  the build machine's copy lacks the call, and fails rather than
+  shipping an AppImage that silently has no tooltip. Distribution
+  packages are unaffected.
+
+## [0.34.1] — the hotkey that waited for itself
+
+### Fixed
+
+- **Force-by-selection now follows the text, not the current layout**
+  ([#68](https://github.com/Just-Code-NET/PolterType/pull/68)).
+  `converted()` trusted `layout_switcher.current()` for the source
+  layout. If the layout had moved on since the word was typed — exactly
+  what the very next word does when it triggers auto-correction — the
+  guess named the layout the caret is in now, `transliterate_to`'s own
+  guard refused it, and the force-switch silently did nothing. Both
+  directions are now tried, current-first; the guard rejects the wrong
+  one on its own, so nothing is forced through blind.
+
+- **The manual switch-last hotkey no longer stalls on Windows**
+  ([#69](https://github.com/Just-Code-NET/PolterType/pull/69)).
+  `GetAsyncKeyState` inside `WH_KEYBOARD_LL` reports the keyboard as it
+  was *before* the event being delivered has taken effect. A Ctrl release
+  therefore arrived reading "Ctrl held", and with nothing typed
+  afterwards that snapshot was the last one the engine got — it believed
+  the force-switch chord was still down and waited for a release it had
+  already been handed, stalling every manual switch 1.5–5 s until the
+  next keystroke. For a modifier the event is about, the event itself is
+  now the truth: a new `Modifiers::after_transition()` applies the
+  delivered key's own press/release, reading the other side of the same
+  modifier live so that releasing one Shift while the other is held keeps
+  Shift. Selection conversion, which ran the same wait, now works on
+  the first press.
+
+## [0.34.0] — a selection is not the word behind it
+
+### Fixed
+
+- **The manual switch-last hotkey no longer converts a word you have
+  moved away from**
+  ([#65](https://github.com/Just-Code-NET/PolterType/issues/65)).
+  Selecting a phrase with `Ctrl+Shift+←` and pressing the hotkey
+  rewrote the *previous* word instead of the selection. The stash the
+  hotkey acts on is deliberately kept across shortcuts — the hotkey is
+  itself a shortcut — but a shortcut built on an arrow, `Home`, `End`
+  or `A` is one whose effect we can read: the caret moved, so a
+  correction that backspaces from it would land in the wrong place.
+  Those now drop the stash, exactly as the same keys do when pressed
+  without a modifier, which is why selecting with plain `Shift+←`
+  always worked.
+
+  The same change closes a worse case nobody had reported yet. With
+  everything selected by `Ctrl+A`, the first Backspace of a correction
+  deletes the whole selection — so the hotkey pressed after a select-all
+  would erase the document and type one word in its place.
+
+### Added
+
+- **`[suggestions] caret_anchor` — whether PolterType may ask the
+  accessibility bus where your text cursor is**
+  ([#66](https://github.com/Just-Code-NET/PolterType/issues/66)). The
+  suggestion tooltip is anchored at the caret, and on Linux the only
+  way to know where that is goes through AT-SPI. Joining that bus is
+  not a private act: it raises `org.a11y.Status.IsEnabled` for the
+  whole session, which is the signal Qt applications take as "a screen
+  reader is running" — Telegram Desktop says so on screen, every
+  session, whether or not a single suggestion was ever shown.
+
+  It stays on by default, and the switch is in Settings → Suggestions
+  (*Place the tooltip at the text cursor*). Off, the tooltip anchors to
+  the window and PolterType never touches the bus at all on Hyprland
+  and X11. On GNOME and KDE Wayland the same bus is the only answer to
+  "which application has focus", which `[exceptions]` needs, so there
+  the connection stays and only the caret subscription goes —
+  `docs/PERMISSIONS.md` says which is which.
+
+  Turning the tooltip itself off now also stops the watcher, which it
+  never did: with `[suggestions] enabled = false` there was nothing in
+  the program that wanted a caret, and it connected anyway.
+
+## [0.33.2] — an idle keyboard costs nothing, a broken line costs a line
+
+### Fixed
+
+- **The Linux listener no longer wakes five hundred times a second to
+  ask an idle keyboard whether anything happened**
+  ([#63](https://github.com/Just-Code-NET/PolterType/issues/63)). Both
+  loops ran on a 2 ms timer: the evdev one polled every open device and
+  slept, the X11 one did the same on its connection. Measured on the
+  0.33.1 AppImage with the engine paused and nothing typed, that was
+  0.55 % of a core and 502 context switches a second, all of it in the
+  `poltertype-input` thread. Both now wait on the descriptors
+  themselves with `poll(2)`; the same measurement reads 0.05 % and 38.
+  On a laptop the bill was never really the half percent — it was the
+  idle states the CPU could not reach.
+
+  Nothing about correction timing was traded away for it. The key gate,
+  which holds your keystrokes back while a correction is on the wire,
+  now wakes the thread through an `eventfd` the instant it is asked
+  rather than waiting out a poll round, so a hold is taken sooner than
+  before. The Caps Lock latch is read on the way *into* the loop
+  instead of on the way out, so a lock toggled by something that sends
+  no key event — KDE InputActions, `xdotool key Caps_Lock`, an
+  on-screen keyboard — is still reconciled before the first word it
+  would otherwise have mis-cased.
+
+- **A translation that will not load can now say why**
+  ([#64](https://github.com/Just-Code-NET/PolterType/issues/64)). One
+  line the TOML parser refuses used to cost the whole catalog, and the
+  interface simply came up in English: the file was right there, the
+  app said nothing, and the only account of what happened was a log
+  line a translator has no reason to read. The commonest way to write
+  such a line is a Windows path — `"C:\path"` is not a valid escape,
+  `"C:\\path"` is. A file that will not parse whole is now read a
+  line at a time: the line that is wrong is dropped, everything else
+  loads, and the Settings window names the file and the line under the
+  language picker. A language that was asked for and produced no
+  catalog at all says that in the same place.
+
+  A second road to the same silence is closed with it. The Settings
+  window skipped loading translations altogether when it could not
+  locate the directory PolterType keeps its own catalogs in — taking
+  the user's own catalog, which lives somewhere else entirely and is
+  the whole translation for every language we do not ship, down with
+  something it had nothing to do with.
+
+  Entries left empty are still exactly what the format says they are —
+  "not translated yet" — and are not reported as anything: a catalog
+  being filled in a line at a time is a normal catalog.
+
+## [0.33.1] — the same program, from a commit that builds clean
+
+### Fixed
+
+- **Nothing in the program changed; the tag did.** v0.33.0 was cut
+  from a commit carrying three `clippy::expect_used` violations in a
+  test file — a lint this workspace denies everywhere, tests included.
+  Test code is never compiled into an installer, so the 0.33.0
+  binaries were correct and this release is byte-for-byte the same
+  program. What was wrong is that `git checkout v0.33.0` followed by
+  `cargo clippy --workspace --all-targets -- -D warnings` failed, so
+  the tag was no use to anyone building or bisecting from it. This
+  one is cut from the commit that fixed them.
+
+  It reached a tag because the pre-commit hook had not been running:
+  `core.hooksPath` in the maintainer's clone named a directory that no
+  longer existed after the checkout moved, and git skips a missing
+  hooks directory without a word. CI caught it on all three platforms,
+  which is what CI is for; the hook is pointed at `.githooks` again so
+  the next one is caught a step earlier.
+
+## [0.33.0] — a question for a plug-in, and the last English in the window
+
+### Added
+
+- **A plug-in's settings page can now offer a search box.** The new
+  `query` pane control draws a line to type a question into, a button to
+  ask it, and the plug-in's answer underneath — where a `report` shows
+  an answer to a question nobody asked, this one shows the answer to
+  yours. Nothing runs until the box is submitted, so opening the page
+  costs no process, and what is typed is never written to the plug-in's
+  config file: a question is asked, answered and forgotten, not stored.
+
+  What is typed reaches the plug-in as **one whole argument**, replacing
+  a `{query}` placeholder the manifest puts in its command — the same
+  substitution a per-row action uses for `{id}`, and never string
+  interpolation, so a question cannot become a second flag. A question
+  beginning with `-` is refused outright rather than passed on.
+
+- **A guide the window links to can now open in your language.** The
+  Setup pane's button led to an English page from a window that was
+  Ukrainian, German, Spanish or French, and there was no way to point
+  it anywhere else (issue #61). A translated guide is now a file
+  beside the English one — `docs/PERMISSIONS.uk.md` — plus one line in
+  the catalog that translates the window: `"docs.permissions" = "uk"`.
+
+  The value is a language tag rather than an address, and the rest of
+  the link is assembled in the program: a catalog can send that button
+  to another translation of our guide and to nothing else. Nothing
+  probes for the file either — PolterType makes exactly one network
+  call and it is the updater — so the catalog line *is* the statement
+  that a translation exists, which is why it travels in the same pull
+  request as the page. `docs/TRANSLATING_THE_UI.md` has the details.
+  No guide has been translated yet; the way to add one is now open.
+
+### Fixed
+
+- **The examples under "Add command" now translate.** The three greyed
+  hints — the signature, the layout id, the path — were written into
+  the program in English and stayed English in every language (issue
+  #62). They are catalog entries now, and a translator is free to make
+  the layout example `uk-UA` rather than `en-US`, which is the more
+  useful hint in a Ukrainian window.
+
+  The snippet example lost its `\n` along the way: nothing between
+  that box and the keystrokes expands one, so an example containing it
+  was promising an escape the engine does not have.
+
+- **All four shipped languages get a feature at the same time.** The
+  plug-in query box above reached the Ukrainian catalog and none of
+  the others. A test now fails the build when the shipped catalogs
+  stop agreeing on which keys they carry.
+
+## [0.32.1] — the Setup pane learns the language the rest of the window speaks
+
+### Fixed
+
+- **The Setup pane's own rows now translate.** Every step on that pane
+  — "Read the keyboard", "Type the correction", the paragraph under
+  each, and on macOS the notes about Accessibility, signing and
+  notifications — stayed English in a window that was otherwise
+  Ukrainian, German, Spanish or French. The pane's frame translated
+  and its content did not, which made the one screen a confused user
+  is sent to the one screen their language did not reach (issue #60).
+
+  The cause is a dependency, not an oversight in any catalog: the text
+  is written in `poltertype-input`, where the per-OS probe has to
+  live, and `tr` lives in `poltertype-core`, which depends on that
+  crate. Nothing there could look a translation up. A step now carries
+  the catalog key beside its English and the Settings window resolves
+  it as it draws — the same "a key and the English at the call site"
+  contract the rest of the interface already had. All four shipped
+  catalogs carry the 24 new keys; a catalog of your own picks them up
+  from `<config-dir>/poltertype/i18n/` the same way.
+
+## [0.32.0] — a tooltip with somewhere to go, and a tray item with its own name
+
+### Fixed
+
+- **Hovering the tray icon says something on Linux too — where the
+  system's tray library is new enough.** The tooltip was written on
+  every state change and thrown away every time: `set_tooltip` is an
+  empty function in `tray-icon`'s Linux backend, in the version we pin
+  and in the five released since. PolterType now drives the indicator
+  itself and fills in the `ToolTip` property a panel reads on hover,
+  with the same sentence Windows and macOS have shown all along: the
+  current layout, whether switching is paused, whether the keyboard
+  hook is missing, and how many drafts are waiting.
+
+  **The API it needs arrived in libayatana-appindicator 0.6.0.** Debian
+  13, Ubuntu and Debian sid all still ship 0.5.94, which has no tooltip
+  functions at all — and the AppImage bundles the copy it was built
+  against, so it is on 0.5.94 too. There, and on the pre-Ayatana
+  `libappindicator3`, the symbol is looked up once, missed, and the
+  tray behaves exactly as it did before. Measured both ways on KDE
+  Plasma: the tooltip drawn on screen against 0.6.0, and the tray
+  unchanged against 0.5.94.
+
+### Changed
+
+- **The tray item says who it is.** It used to register as
+  `tray-icon tray app` — the id every application built on that crate
+  shares — and carried no title, so a panel listing hidden items fell
+  back to the lower-cased process name. It is now `poltertype`, titled
+  `PolterType`. A panel that remembers per-item whether an icon was
+  shown may treat it as a new item once.
+
+- **The guide to translating the interface no longer invites a PR.**
+  The set of languages the build ships is closed for now; a catalog of
+  your own lives in `<config-dir>/poltertype/i18n/`, where it loads the
+  same way, wins over the shipped files key by key, survives an update
+  and is a single file to pass to anyone who wants it.
+
+## [0.31.0] — five languages in the interface, and a switch that needs no restart
+
+### Added
+
+- **A plug-in can ship its own translations.** Its settings pane is
+  drawn by PolterType but worded by its manifest, so the words now come
+  from a catalog the plug-in carries: `<plugin>/i18n/<lang>.toml`, keys
+  derived from the manifest's own structure, printed ready to translate
+  by `poltertype --plugin-strings <id>`. The catalog is confined to
+  `plugin.<id>.` — an extension can retitle its own pane and nothing
+  else — and it is independent of the interface's own languages, so a
+  plug-in can offer Polish while the window around it is English.
+
+  Values are never translated: an option's `value`, a control's key and
+  a command's id still reach the plug-in's config exactly as its author
+  wrote them, and a drop-down now shows the label while writing the
+  value. What a plug-in *prints* — report text, the rows of a list —
+  only it can translate, so every plug-in process is handed
+  `POLTERTYPE_LOCALE`.
+
+- **A language picker, in General → Appearance.** It lists what is
+  actually on disk — the shipped catalogs, one a plug-in brought, one
+  you dropped into `<config-dir>/poltertype/i18n/` yourself — so a
+  translation can be tried without hand-editing `config.toml`, and a
+  language PolterType has no name for is offered under its code rather
+  than hidden. The window changes language as you pick it, and the tray
+  menu follows when the settings are saved — neither waits for a
+  restart, and the tray's own words are rewritten where they stand.
+
+- **The whole window and the tray menu are translated, not just the
+  panes.** The side navigation, every pane's footnotes and form labels,
+  the save and status lines, the Setup pane's badges and notes, the
+  tray's own entries, its tooltip and the "switched", "word added" and
+  "update ready" notifications all go through the catalog now, with
+  Ukrainian shipped for every one of them. A plug-in's tray entries are
+  translated from its own catalog, exactly as its settings pane is.
+
+  Every pane's subtitle goes through the catalog too — the sentence
+  under each heading was the last thing still drawn from a raw literal
+  — and so does the suggestion popup's "Add to dictionary", the one
+  piece of interface the engine shows while you type.
+
+  Three things stay English by design: error notifications, which carry
+  the operating system's own message; the Setup pane's step titles,
+  which come from the permission probe in a crate that does not depend
+  on the translation loader; and the plug-in supervisor's failures,
+  which name a plug-in's ids beside an OS error.
+
+- **The Plug-ins pane speaks the interface's language.** Everything
+  PolterType draws around a plug-in — Add, Remove, Refresh, Select all,
+  "Asking the plug-in…", the placeholders and the save line — goes
+  through the catalog like the rest of the window, with the Ukrainian
+  translation shipped.
+
+- **Three more interface languages: German, Spanish and French.** Each
+  is a complete catalog — every string the window, the tray menu, the
+  notifications and the suggestion popup draw — so the picker in
+  General → Appearance now offers Deutsch, Español, Français and
+  Українська beside the system default. English needs no catalog: it
+  is compiled into every call site.
+
+### Changed
+
+- **The file-organization rules became a gate rather than a
+  convention.** `cargo xtask style` reads the tree and fails on what
+  `CONTRIBUTING.md` had only ever asked for — one kind of thing per
+  file, unit tests in a sibling `tests.rs`, a platform `cfg` only on
+  the declaration that picks a per-OS module — and it runs in the
+  pre-commit hook and in CI. The tree was brought under it in the same
+  breath: `poltertype-app` and `poltertype-core` now hold no platform
+  `cfg` at all, and the files that had grown into bags were split.
+  Nothing a user can see changed.
+
+### Fixed
+
+- **`<config-dir>/poltertype/i18n/` is read at last.** The loader only
+  ever looked at the shipped catalog, so the edit-and-reload loop
+  `docs/TRANSLATING_THE_UI.md` promises translators did not work and a
+  language PolterType does not ship could not be tried without editing
+  the source tree. Catalogs are now layered — shipped, then plug-ins,
+  then yours — and the last one to name a key wins.
+
+## [0.30.0] — the gesture that went quiet, and a clipboard that was never there
+
+### Added
+
+- **The tray icon can be the layout's flag.** `[general] tray_icon`
+  takes a fourth value, `flag`, and the General pane a fourth chip: the
+  icon becomes the country of the layout in force — Ukraine, Spain,
+  Japan — instead of its two-letter code. The flags are drawn by the
+  same arithmetic that draws the lettered badge, so nothing new is
+  downloaded, embedded or rasterised by a font.
+
+  Thirty-nine countries have a drawing. A layout whose country has none
+  — or that names no country at all, like Windows' opaque layout ids —
+  keeps the lettered `color` badge, so the icon never stops saying
+  which layout is in force. Countries whose flags differ only by an
+  emblem too small to draw at this size (Slovakia, Slovenia, Serbia,
+  Croatia, Mexico) are deliberately left to the letters rather than
+  drawn as a flag that would be wrong.
+
+  Pausing dims the flag rather than flattening it, so the bands, cross
+  or disc still name the country while the icon reads as inactive.
+
+- **Selection conversion works on macOS**, and the toggle is no longer
+  refused there. The emitter can send a chord now — modifiers travel as
+  flags on the key events, the way macOS matches menu shortcuts, with
+  an SC-1 → Apple keycode table that refuses what it cannot name — so
+  `Cmd+C` and `Cmd+V` reach the focused application and the
+  `NoCopyChord` gap closes. Contributed on
+  [#55](https://github.com/Just-Code-NET/PolterType/pull/55), measured
+  on an M1 Pro.
+
+- **Updates can keep their macOS permissions.** `[updates]
+  local_signing_identity` names a codesign identity in the login
+  keychain; the installer re-signs the swapped bundle with it, and TCC
+  then keys Accessibility and Input Monitoring to certificate plus
+  identifier instead of to the hash of the bundle's own bytes — which
+  is what made every previous update look like new software. A Setup
+  step creates the identity in one click. Left empty, updates stay
+  ad-hoc as before, and the installer clears the two stale TCC records
+  after a successful swap so the *Ask* buttons can raise the system
+  prompt again. Groundwork for
+  [#42](https://github.com/Just-Code-NET/PolterType/issues/42); the
+  real fix is still a Developer ID.
+
+- **`[engine] hold_keys`** exposes the key gate as a setting. Off by
+  default, which is unchanged behaviour and the project's documented
+  latency stance; on, a keystroke landing mid-correction is held and
+  replayed after it rather than racing the burst.
+
+### Fixed
+
+- **The manual hotkey answers again after the caret moves**
+  ([#57](https://github.com/Just-Code-NET/PolterType/issues/57),
+  [#56](https://github.com/Just-Code-NET/PolterType/issues/56)). Press
+  an arrow key, or click away from a window and back, then type a word
+  and press the hotkey: nothing happened, and nothing kept happening
+  until a space was typed.
+
+  One cause under both. Interrupting a word marks the buffer, so the
+  half-seen word is never corrected from the tail we watched — but the
+  same interruption also clears the buffer, so that mark could only
+  ever land on the *next* word, one seen from its first key at a caret
+  nothing had moved since. The mark now says the narrower thing it
+  always meant for this gesture: *a word we stopped recording is still
+  on screen at the caret*. A shortcut and an idle gap leave exactly
+  that and are still refused; an arrow key and a click move the caret
+  off it and are not. Automatic switching is unchanged — a word typed
+  after an arrow key mid-word is still left alone.
+
+- **Selection conversion works on Linux**
+  ([#51](https://github.com/Just-Code-NET/PolterType/issues/51)). It
+  never had, on any Linux session without a clipboard manager, and two
+  separate faults were each enough on their own.
+
+  X11 and Wayland both serve the clipboard from the process that owns
+  it, and the handle PolterType wrote through was closed as soon as the
+  write returned — so the converted text was destroyed before the paste
+  could ask for it, and the restore afterwards wiped the user's own
+  clipboard instead of putting it back. KDE hid this because it ships a
+  clipboard manager, which adopts an orphaned selection; Cinnamon and
+  the bare sessions ship none. The writing handle is now held for the
+  life of the process, which is the lifetime the protocols ask for.
+
+  And the copy chord went out while the hotkey was still held, where an
+  X11 passive grab has become an *active* one and everything the app
+  emits goes to the client holding the grab rather than to the focused
+  window. Every other force-switch path already waited for the key to
+  come up; this one now does too.
+
+- **A wrong-direction press no longer mangles punctuation.** Converting
+  a selection whose text holds no letter of the layout it would be read
+  from is refused outright: `проверяю` converted to `ghjdthz.` and
+  pressed again put the `.` — which exists on the Russian layout, on
+  its own key — through to `/`, and nothing later brought the letter
+  back. Contributed on #55.
+
+- **macOS: an update no longer relaunches the version it replaced.**
+  The Settings window is a subprocess of the same executable and
+  outlived the swap, so `open` found the app already running and merely
+  activated the old window. Child windows now come along on the update
+  hand-off and on Quit, and the installer swaps `Contents` inside the
+  bundle instead of moving the `.app` aside — which also retires the
+  `poltertype.app.new` that Spotlight used to surface mid-install.
+  Reported on
+  [#42](https://github.com/Just-Code-NET/PolterType/issues/42).
+
 ## [0.29.0] — one window, and an icon that fits the panel
 
 ### Changed

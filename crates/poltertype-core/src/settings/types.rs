@@ -123,9 +123,11 @@ pub struct GeneralSettings {
     /// posture as `ui_language`.
     pub ui_theme: String,
     /// How the tray icon is drawn: `"color"` (a hue per layout),
-    /// `"mono"` (one neutral badge) or `"hidden"` (no tray icon and no
-    /// tray menu — the Settings window still opens with
-    /// `poltertype --settings`). Read through
+    /// `"mono"` (one neutral badge), `"flag"` (the layout's country,
+    /// falling back to `"color"` for a country the app has no drawing
+    /// for) or `"hidden"` (no tray icon and no tray menu — the
+    /// Settings window still opens with `poltertype --settings`).
+    /// Read through
     /// [`TrayIconStyle`](crate::settings::TrayIconStyle), which falls
     /// back to `"color"` on anything else.
     pub tray_icon: String,
@@ -183,6 +185,32 @@ pub struct EngineSettings {
     /// deliberately. The manual hotkey still works, since `last_word` is
     /// stashed before any filter. Default: on.
     pub suppress_for_all_caps: bool,
+    /// Hold the user's keystrokes back while a correction burst is on
+    /// the wire, and replay them after it — the deterministic guard
+    /// against a letter typed mid-correction landing inside the
+    /// corrected word. **Windows and macOS only**, where it costs a small
+    /// input delay after each correction and so defaults off — see the
+    /// trade in docs/PERMISSIONS.md. On Linux/Wayland the gate is on
+    /// whenever the input stack allows it and this key is not read;
+    /// `POLTERTYPE_HOLD_KEYS=0` is what turns it off there. The
+    /// variable (`1`/`0`) overrides in either direction everywhere; the
+    /// gate is built at startup, so changing either needs a restart.
+    pub hold_keys: bool,
+    /// How fast a correction is typed out **and** how long the engine
+    /// waits between switching the layout and typing against it:
+    /// `"normal"`, `"fast"` or `"instant"`, parsed by
+    /// [`ReplaySpeed`](poltertype_input::ReplaySpeed), which falls back
+    /// to `"normal"` on anything else.
+    ///
+    /// The pacing half is Linux only in effect — Windows sends a burst
+    /// in one call and macOS paces against the window server, so
+    /// neither has a pause to give up. The waits are everywhere, and
+    /// they never scale to nothing: see
+    /// [`ReplaySpeed::settle`](poltertype_input::ReplaySpeed::settle)
+    /// for why one of the two can reach zero and the other cannot.
+    ///
+    /// Applies to the next correction, not the next start.
+    pub replay_speed: String,
 }
 
 impl Default for EngineSettings {
@@ -194,6 +222,8 @@ impl Default for EngineSettings {
             idle_timeout_ms: 2000,
             suppress_in_identifiers: true,
             suppress_for_all_caps: true,
+            hold_keys: false,
+            replay_speed: "normal".into(),
         }
     }
 }
@@ -290,6 +320,24 @@ pub struct SuggestionSettings {
     /// up. Parsed like `[hotkeys]` strings; empty disables keyboard
     /// accept, leaving click-to-apply only.
     pub accept_modifiers: String,
+    /// Put the tooltip next to the text cursor rather than at the
+    /// window.
+    ///
+    /// **Linux only, and it costs more than it looks.** The caret
+    /// position comes from the accessibility bus, and an application
+    /// that joins that bus raises `org.a11y.Status.IsEnabled` for the
+    /// whole session — which switches Qt applications into
+    /// screen-reader mode, loudly in Telegram's case (issue #66).
+    /// Turned off, the tooltip anchors to the window and PolterType
+    /// never touches the bus at all on Hyprland or X11. On GNOME and
+    /// KDE Wayland that bus is also the only answer to "which
+    /// application is focused", which `[exceptions]` needs, so there
+    /// the connection stays and only the caret subscription goes.
+    ///
+    /// Windows and macOS read the caret through ordinary APIs with no
+    /// side effect outside this process and ignore this setting. The
+    /// tracker is built at startup, so a change needs a restart.
+    pub caret_anchor: bool,
 }
 
 impl Default for SuggestionSettings {
@@ -299,6 +347,7 @@ impl Default for SuggestionSettings {
             max_suggestions: 5,
             tooltip_timeout_secs: 30,
             accept_modifiers: "Ctrl+Shift".into(),
+            caret_anchor: true,
         }
     }
 }
@@ -335,6 +384,15 @@ pub struct UpdateSettings {
     /// (see [`UpdateSettings::interval`]) so a hand-edited `0` cannot
     /// turn the updater into a request loop against GitHub.
     pub check_interval_hours: u64,
+    /// macOS: common name of a codesign identity in the login keychain.
+    /// Non-empty, and the updater re-signs every swapped bundle with it,
+    /// so TCC keeps the Accessibility / Input Monitoring grants across
+    /// updates (they key on certificate + identifier instead of the
+    /// bundle hash). Empty — ad-hoc updates as before, and the installer
+    /// resets the two stale TCC records instead, so the Ask buttons
+    /// work right after the swap. Set up once with
+    /// `poltertype --setup-local-signing`.
+    pub local_signing_identity: String,
 }
 
 impl Default for UpdateSettings {
@@ -342,12 +400,10 @@ impl Default for UpdateSettings {
         Self {
             enabled: true,
             check_interval_hours: 24,
+            local_signing_identity: String::new(),
         }
     }
 }
-
-/// Never check more often than this, whatever `config.toml` says.
-pub const MIN_UPDATE_INTERVAL_HOURS: u64 = 1;
 
 impl UpdateSettings {
     /// The check interval, with the hand-edit floor applied: a

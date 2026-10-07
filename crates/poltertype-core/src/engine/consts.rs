@@ -19,6 +19,25 @@ pub const MOD_DOUBLE_TAP_GAP: Duration = Duration::from_millis(500);
 /// genuinely-typed word.
 pub const PASTE_GUARD: Duration = Duration::from_millis(1200);
 
+/// How long a key may be seen down before the engine stops waiting for
+/// its release. Past this it is either held on purpose or its release
+/// never reached us (a device unplugged mid-press), and a correction
+/// that waited on it would wait on every word.
+pub const KEY_DOWN_STALE: Duration = Duration::from_secs(2);
+
+/// How long after a word's first key its layout stamp is re-read, when
+/// the word started after a click, a shortcut or a focus change.
+///
+/// The listener reads a key off the device before the compositor has
+/// finished handling the focus change in front of it, and a desktop
+/// that keeps a layout per window answers with the previous window's
+/// until it has — about 70 ms after `Alt` comes up on Plasma 6, measured
+/// in the VM on 2026-09-25 (issue #72), and plainly longer on the
+/// reporter's machine, where it failed more often than not. Generous on
+/// purpose: inside it the stamp follows the compositor, which costs a
+/// few reads; a switch by hand this early in a word is what it gives up.
+pub const FOCUS_SETTLE: Duration = Duration::from_millis(500);
+
 /// How long the last completed word stays reachable by the manual
 /// switch-last hotkey once typing stops.
 ///
@@ -34,20 +53,11 @@ pub const PASTE_GUARD: Duration = Duration::from_millis(1200);
 pub const LAST_WORD_TTL: Duration = Duration::from_secs(60);
 
 /// The copy chord selection conversion presses into the focused
-/// application: `Ctrl+C` on the platforms that have one.
-///
-/// macOS wants `Cmd+C`, which is why this is a constant to be corrected
-/// rather than a literal buried in the flow — and why the macOS
-/// emitter's `send_chord` still answering `Unsupported` is what keeps
-/// the feature honestly off there rather than pressing the wrong keys.
-pub const COPY_CHORD: poltertype_types::SwitchChord = poltertype_types::SwitchChord {
-    // `C` in Win SC Set-1, which coincides with evdev's `KEY_C`.
-    scancode: 0x2E,
-    ctrl: true,
-    shift: false,
-    alt: false,
-    meta: false,
-};
+/// application. Defined in `poltertype-input`, which is a crate
+/// allowed to know that macOS wants `Cmd` where everything else wants
+/// `Ctrl`; re-exported here so the engine's constants still read as
+/// one set.
+pub use poltertype_input::COPY_CHORD;
 
 /// Pause between releasing the hotkey's own modifiers and pressing the
 /// copy chord, so the compositor does not read both in one frame.
@@ -76,15 +86,9 @@ pub const CHORD_RELEASE_SETTLE: Duration = Duration::from_millis(40);
 /// worse.
 pub const CHORD_RELEASE_WAIT: Duration = Duration::from_millis(5000);
 
-/// The paste chord that puts the converted selection back.
-pub const PASTE_CHORD: poltertype_types::SwitchChord = poltertype_types::SwitchChord {
-    // `V` in Win SC Set-1, which coincides with evdev's `KEY_V`.
-    scancode: 0x2F,
-    ctrl: true,
-    shift: false,
-    alt: false,
-    meta: false,
-};
+/// The paste chord that puts the converted selection back. Same
+/// origin as [`COPY_CHORD`], for the same reason.
+pub use poltertype_input::PASTE_CHORD;
 
 /// How long the converted text stays on the clipboard after the paste
 /// chord goes out, before the user's own clipboard is put back.
@@ -116,6 +120,27 @@ pub const SELECTION_COPY_WAIT: Duration = Duration::from_millis(400);
 /// echo apart from a person pressing again — and a person needs to see
 /// the result first, which no one does in a fifth of a second.
 pub const FORCE_SWITCH_REARM: Duration = Duration::from_millis(200);
+
+/// How often the two release waits look again at whether the key that
+/// asked for a correction has come up.
+///
+/// Pure detection latency — nothing at all happens between the key
+/// rising and our next look, so this poll is a floor under every
+/// manual switch, and the 20 ms it used to be was a fifth of the
+/// budget issue #71 was about. Small enough to disappear next to the
+/// rest of the path, large enough that a hotkey held down is not a
+/// spin loop.
+pub const TRIGGER_POLL: Duration = Duration::from_millis(4);
+
+/// Gap between the probes that wait for the user's fingers to settle
+/// before a correction goes out.
+///
+/// Three empty probes end the wait, so the cost is two of these. Past
+/// a fast typist's inter-key gap at the default — a keystroke that
+/// arrives after it lands *inside* the burst and has to be repaired
+/// instead of absorbed, which is why the faster gears scale it rather
+/// than the guards.
+pub const ABSORB_PROBE: Duration = Duration::from_millis(30);
 
 /// How long to wait after an emission burst before probing the key
 /// stream for keystrokes that raced it — the trip from the device
@@ -196,6 +221,12 @@ pub const HELD_FLUSH_QUIET_PROBES: u8 = 3;
 
 /// SC Set-1 scancode for the `V` key (matches evdev `KEY_V` on Linux).
 pub const SC_V: u32 = 0x2F;
+/// SC Set-1 scancode for the `A` key (matches evdev `KEY_A`), which is
+/// select-all nearly everywhere and a caret jump in the rest.
+pub const SC_A: u32 = 0x1E;
+/// SC Set-1 scancode for Esc, which every text field reads as "never
+/// mind" — the buffer already treats it as the caret moving.
+pub const SC_ESC: u32 = 0x01;
 /// evdev `KEY_INSERT` — used for the Shift+Insert paste shortcut. (Insert
 /// has no plain SC-1 byte; the listener reports the raw evdev code.)
 pub const SC_INSERT: u32 = 110;

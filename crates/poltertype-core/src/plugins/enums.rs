@@ -1,4 +1,5 @@
-//! What kind of plug-in this is, and why an install refused.
+//! What kind of plug-in this is, the shape of a pane control and the
+//! value it holds, and why an install refused.
 
 use std::path::PathBuf;
 
@@ -88,6 +89,21 @@ pub enum ControlKind {
     /// in a fixed-width block: it cannot draw a button, style itself, or
     /// look like anything PolterType said.
     Report,
+    /// A box to type a question into, and the plug-in's answer under
+    /// it.
+    ///
+    /// The only control that sends the user's own words to a plug-in,
+    /// which is why what is typed is substituted as a **whole
+    /// argument** — the `{query}` placeholder, exactly as a row action
+    /// substitutes `{id}` — and never interpolated into one. Pasting it
+    /// inside an argument is how a question would turn into a second
+    /// flag.
+    ///
+    /// Binds to no key and writes nothing: a question is asked and
+    /// answered, not configured. `command` names what answers it, and
+    /// nothing runs until somebody presses Ask — a search with no
+    /// question is not a question.
+    Query,
     /// A checkbox per row, where the rows come from the plug-in and
     /// ticking one adds its id to an array in the plug-in's config — for
     /// a set a manifest cannot write down in advance, such as what is
@@ -110,6 +126,116 @@ pub enum ControlKind {
     /// refusal takes the whole manifest — and the plug-in — with it.
     #[serde(other)]
     Unknown,
+}
+
+/// One alternative offered by a [`ControlKind::Choice`].
+///
+/// Either a bare value — what every manifest wrote before an option could
+/// explain itself — or a table that adds a sentence and a link. Both
+/// forms live in the same `options` array, so a plug-in can describe the
+/// three choices that need it and leave the other two as strings:
+///
+/// ```toml
+/// options = [
+///   "off",
+///   { value = "qwen3:8b", label = "Qwen3 8B",
+///     detail = "Fits an 8 GB card whole.",
+///     link = "https://ollama.com/library/qwen3" },
+/// ]
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PaneOption {
+    /// Just the value; it is its own label and says nothing more.
+    Value(String),
+    Described {
+        /// What is written into the plug-in's config when this is chosen.
+        value: String,
+        /// What to show instead of the raw value. Empty means the value.
+        #[serde(default)]
+        label: String,
+        /// A sentence about this alternative, shown under it.
+        #[serde(default)]
+        detail: String,
+        /// Where its makers describe it. `https` only — see
+        /// `validate::check_pane`.
+        #[serde(default)]
+        link: String,
+    },
+}
+
+impl PaneOption {
+    /// The string written into the config.
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Value(v) => v,
+            Self::Described { value, .. } => value,
+        }
+    }
+
+    /// What the user reads. The value itself unless the plug-in named
+    /// something friendlier.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Value(v) => v,
+            Self::Described { value, label, .. } => {
+                if label.trim().is_empty() {
+                    value
+                } else {
+                    label
+                }
+            }
+        }
+    }
+
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Value(_) => "",
+            Self::Described { detail, .. } => detail,
+        }
+    }
+
+    pub fn link(&self) -> &str {
+        match self {
+            Self::Value(_) => "",
+            Self::Described { link, .. } => link,
+        }
+    }
+
+    /// Does this option carry anything beyond its value? A choice where
+    /// none do is drawn as a drop-down, as it always was.
+    pub fn is_described(&self) -> bool {
+        !self.detail().trim().is_empty() || !self.link().trim().is_empty()
+    }
+}
+
+/// A value a pane control can hold. Deliberately the three shapes the
+/// controls produce, rather than all of TOML: a pane is not a config
+/// editor, and a control that cannot render a value has no business
+/// writing one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingValue {
+    Bool(bool),
+    Int(i64),
+    /// Kept apart from [`Self::Int`] all the way to the file: a plug-in
+    /// expecting `0.35` refuses to start on `1`.
+    Float(f64),
+    Text(String),
+}
+
+impl SettingValue {
+    /// How it should appear in a text field.
+    pub fn as_display(&self) -> String {
+        match self {
+            Self::Bool(b) => b.to_string(),
+            Self::Int(n) => n.to_string(),
+            // Always with a point: `25` shown for a `25.0` invites the
+            // user to save back an integer the plug-in cannot read.
+            Self::Float(f) if f.is_finite() && f.fract() == 0.0 => format!("{f:.1}"),
+            Self::Float(f) => f.to_string(),
+            Self::Text(s) => s.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]

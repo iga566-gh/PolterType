@@ -9,22 +9,25 @@ use anyhow::{Context, Result};
 use crossbeam_channel::Receiver;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use poltertype_core::engine::{EngineCommand, SwitcherEvent};
+use poltertype_core::i18n::tr_args;
 use poltertype_core::layouts::LayoutDb;
 use poltertype_core::settings::SettingsStore;
+use poltertype_shell::notification_sender_ready;
+use poltertype_tray::Tray;
 use poltertype_types::LayoutId;
 use tao::event_loop::EventLoopProxy;
 use tracing::{debug, info, warn};
-use tray_icon::TrayIcon;
 use tray_icon::menu::{MenuEvent, MenuItem};
 
 use crate::consts::*;
 use crate::enums::*;
+use crate::plugins;
 use crate::tray::*;
 use crate::types::*;
 
 pub(crate) fn handle_engine_event(
     ev: SwitcherEvent,
-    tray: &TrayIcon,
+    tray: &Tray,
     item_pause: &MenuItem,
     state: &mut TrayState,
     settings: &Arc<SettingsStore>,
@@ -86,6 +89,9 @@ pub(crate) fn handle_engine_event(
 /// are logged and swallowed — a missing notification daemon must not
 /// propagate up.
 pub(crate) fn spawn_layout_change_notification(layouts: &Arc<LayoutDb>, to_layout: &LayoutId) {
+    if !notification_sender_ready() {
+        return;
+    }
     let pretty = layouts
         .get(to_layout)
         .map(|m| m.name.clone())
@@ -97,7 +103,7 @@ pub(crate) fn spawn_layout_change_notification(layouts: &Arc<LayoutDb>, to_layou
         .spawn(move || {
             let mut n = notify_rust::Notification::new();
             n.summary("PolterType")
-                .body(&format!("Switched to {pretty}"))
+                .body(&tr_args("notify.switched", "Switched to {}", &[&pretty]))
                 .appname(APP_NAME)
                 .icon(poltertype_shell::DESKTOP_ID)
                 .timeout(notify_rust::Timeout::Milliseconds(2000));
@@ -126,11 +132,18 @@ pub(crate) fn spawn_dictionary_add_notification(
     layout: &LayoutId,
     word: &str,
 ) {
+    if !notification_sender_ready() {
+        return;
+    }
     let pretty = layouts
         .get(layout)
         .map(|m| m.name.clone())
         .unwrap_or_else(|| layout.as_str().to_owned());
-    let body = format!("Added “{word}” to your {pretty} dictionary — it won't be corrected again.");
+    let body = tr_args(
+        "notify.word_added",
+        "Added “{}” to your {} dictionary — it won't be corrected again.",
+        &[word, &pretty],
+    );
     std::thread::Builder::new()
         .name("poltertype-notify-dict".into())
         .spawn(move || {
@@ -155,6 +168,9 @@ pub(crate) fn spawn_dictionary_add_notification(
 ///
 /// Longer timeout than the others, because this text has to be read.
 pub(crate) fn spawn_error_notification(body: String) {
+    if !notification_sender_ready() {
+        return;
+    }
     std::thread::Builder::new()
         .name("poltertype-notify-error".into())
         .spawn(move || {
@@ -171,6 +187,24 @@ pub(crate) fn spawn_error_notification(body: String) {
         .ok();
 }
 
+/// Tell the user a plug-in service is gone, once, as it happens.
+///
+/// A stopped plug-in is invisible by construction: its tray entries are
+/// one-shot commands that keep working, so the menu looks identical
+/// whether the service behind it is running or dead. On the
+/// error-notification path, so `show_notifications` does not gate it.
+pub(crate) fn announce_departed(gone: Vec<plugins::Departed>) {
+    for d in gone {
+        spawn_error_notification(format!(
+            "The {id} plug-in stopped and will not restart on its own.\n\
+             {why}\n\
+             Its own log is next to PolterType's, as plugin-{id}.log.",
+            id = d.id,
+            why = d.why,
+        ));
+    }
+}
+
 /// "PolterType 0.4.0 is ready — it will install when you restart."
 ///
 /// Not gated by `[general].show_notifications`, for the same reason
@@ -178,10 +212,15 @@ pub(crate) fn spawn_error_notification(body: String) {
 /// version, and it is the only thing that tells a user who never opens
 /// the tray menu that an update is waiting.
 pub(crate) fn spawn_update_notification(version: &str) {
-    let body = format!(
-        "Version {version} is downloaded and ready.\n\
+    if !notification_sender_ready() {
+        return;
+    }
+    let body = tr_args(
+        "notify.update_ready",
+        "Version {} is downloaded and ready.\n\
          It will be installed the next time you restart PolterType — \
-         or click \"Restart to update\" in the tray menu."
+         or click \"Restart to update\" in the tray menu.",
+        &[version],
     );
     std::thread::Builder::new()
         .name("poltertype-notify-update".into())

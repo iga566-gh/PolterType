@@ -14,9 +14,6 @@
 use super::enums::{ControlKind, PluginError};
 use super::types::ExtensionManifest;
 
-/// Directory an extension's program must live in, inside the plug-in.
-pub const EXTENSION_BIN_DIR: &str = "bin";
-
 /// Refuse a manifest that would leave PolterType doing something
 /// unclear on the plug-in's behalf.
 pub fn check_extension(m: &ExtensionManifest) -> Result<(), PluginError> {
@@ -68,15 +65,24 @@ pub fn check_extension(m: &ExtensionManifest) -> Result<(), PluginError> {
 
     for control in &m.pane {
         match control.kind {
-            ControlKind::Button | ControlKind::Report => {
+            ControlKind::Query if !query_command_takes_it(m, &control.command) => {
+                return Err(PluginError::BadPane(format!(
+                    "query box {:?} names command {:?}, which has no {} argument — what is \
+                     typed would be thrown away",
+                    control.label,
+                    control.command,
+                    super::consts::QUERY_PLACEHOLDER
+                )));
+            }
+            ControlKind::Button | ControlKind::Report | ControlKind::Query => {
                 // Both name a command rather than a key; pointed at one
                 // nobody declared, a report renders an empty box for
                 // ever, which reads as "nothing to say".
                 if !m.commands.iter().any(|c| c.id == control.command) {
-                    let what = if control.kind == ControlKind::Button {
-                        "button"
-                    } else {
-                        "report"
+                    let what = match control.kind {
+                        ControlKind::Button => "button",
+                        ControlKind::Query => "query box",
+                        _ => "report",
                     };
                     return Err(PluginError::BadPane(format!(
                         "{what} {:?} refers to unknown command {:?}",
@@ -303,6 +309,17 @@ fn is_plain_file_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
+/// Does the command a query box names actually take the question?
+///
+/// Answers `true` for a command that does not exist: the arm that
+/// reports an unknown command says that better, and naming one fault
+/// twice helps nobody.
+fn query_command_takes_it(m: &ExtensionManifest, command_id: &str) -> bool {
+    m.commands
+        .iter()
+        .find(|c| c.id == command_id)
+        .is_none_or(|c| c.args.iter().any(|a| a == super::consts::QUERY_PLACEHOLDER))
+}
+
 #[cfg(test)]
-#[path = "validate_tests.rs"]
 mod tests;

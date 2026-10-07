@@ -20,66 +20,53 @@
 //! neither**. On those two the feature cannot work the way this app
 //! requires, and says so.
 
+mod enums;
+
 use crate::InputError;
 
-/// The system clipboard, as much of it as this app has any business
-/// touching: text in, text out.
-pub trait Clipboard: Send + Sync {
-    /// The clipboard's current text, or `None` when it holds something
-    /// that is not text (an image, a file list). `None` is not an
-    /// error: it is the answer that stops a caller replacing an image
-    /// with a string.
-    fn text(&self) -> Result<Option<String>, InputError>;
-
-    /// Replace the clipboard's contents with `text`.
-    ///
-    /// On Wayland this makes *us* the owner of the selection, so the
-    /// data lives as long as this process does — fine for a tray app
-    /// that outlives the interaction, and the reason restoring what was
-    /// there is possible at all.
-    fn set_text(&self, text: &str) -> Result<(), InputError>;
-}
-
-/// Why the clipboard is unavailable here, in words a Setup pane can
-/// show without the reader knowing what a Wayland protocol is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClipboardGap {
-    /// The compositor offers no data-control protocol, so the only way
-    /// to read the clipboard would be to take focus.
-    NoWindowlessAccess,
-    /// The platform has a clipboard but this build could not open it.
-    Unavailable(String),
-    /// The clipboard is fine; this build cannot press the copy chord
-    /// that would fill it. macOS, until its emitter grows `send_chord`.
-    NoCopyChord,
-}
-
-impl std::fmt::Display for ClipboardGap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoWindowlessAccess => write!(
-                f,
-                "this desktop does not let a background app read the clipboard \
-                 without taking keyboard focus, which PolterType will not do"
-            ),
-            Self::Unavailable(why) => write!(f, "the clipboard could not be opened: {why}"),
-            Self::NoCopyChord => write!(
-                f,
-                "PolterType cannot yet send the copy shortcut on this platform, \
-                 so it has no way to read what you have selected"
-            ),
-        }
-    }
-}
+pub use crate::traits::Clipboard;
+pub use enums::ClipboardGap;
 
 /// The system clipboard as `arboard` sees it.
 ///
-/// A fresh handle per call rather than one held open: on Wayland the
-/// handle owns a connection and, once we have written, the selection
-/// itself, and a long-lived one would keep serving stale data after
-/// the user copied something else. Opening costs a socket round trip,
-/// and this runs once per force-switch on a word that is not there.
-struct SystemClipboard;
+/// **Reads** open a fresh handle per call rather than one held open: on
+/// Wayland the handle owns a connection and, once we have written, the
+/// selection itself, and a long-lived one would keep serving stale data
+/// after the user copied something else. Opening costs a socket round
+/// trip, and this runs once per force-switch on a word that is not
+/// there.
+///
+/// **Writes** cannot do that, and doing it is why selection conversion
+/// never worked on Linux. Both X11 and Wayland serve the clipboard from
+/// the process that owns it, so a write is only as durable as the
+/// handle that made it — `arboard` tears its serving window down with
+/// the last one, and the text is gone before anything can paste it.
+/// Measured 2026-09-02 on a nested X server with no clipboard manager,
+/// on XWayland and on Hyprland's data-control protocol: a marker
+/// written through a dropped handle reads back as an *empty* clipboard
+/// on all three, and survives on all three when the handle is kept.
+///
+/// That destroyed the converted text before the paste chord went out,
+/// and took the user's own clipboard with it on the way back — the
+/// restore was written through a temporary handle too (issue #51).
+/// Windows is unaffected: its clipboard is owned by the OS, not served
+/// by the writer, which is why the same code was confirmed working
+/// there (issue #32).
+///
+/// So the writing handle stays. This is a tray app; it outlives the
+/// paste by design, which is exactly the lifetime the protocols ask
+/// for.
+struct SystemClipboard {
+    writer: parking_lot::Mutex<Option<arboard::Clipboard>>,
+}
+
+impl SystemClipboard {
+    fn new() -> Self {
+        Self {
+            writer: parking_lot::Mutex::new(None),
+        }
+    }
+}
 
 impl Clipboard for SystemClipboard {
     fn text(&self) -> Result<Option<String>, InputError> {
@@ -95,7 +82,11 @@ impl Clipboard for SystemClipboard {
     }
 
     fn set_text(&self, text: &str) -> Result<(), InputError> {
-        let mut cb = arboard::Clipboard::new().map_err(map_err)?;
+        let mut writer = self.writer.lock();
+        let cb = match writer.as_mut() {
+            Some(cb) => cb,
+            None => writer.insert(arboard::Clipboard::new().map_err(map_err)?),
+        };
         cb.set_text(text.to_owned()).map_err(map_err)
     }
 }
@@ -111,7 +102,7 @@ fn map_err(e: arboard::Error) -> InputError {
 /// honest answer and it is the one the library gives.
 pub fn clipboard() -> Result<Box<dyn Clipboard>, ClipboardGap> {
     match arboard::Clipboard::new() {
-        Ok(_) => Ok(Box::new(SystemClipboard)),
+        Ok(_) => Ok(Box::new(SystemClipboard::new())),
         Err(e) => {
             let why = e.to_string();
             // `wl-clipboard-rs` speaks only the data-control protocols
@@ -138,62 +129,16 @@ pub fn clipboard() -> Result<Box<dyn Clipboard>, ClipboardGap> {
 /// has to be reachable without taking focus, which is a property of the
 /// session and is probed. And the emitter has to be able to hold
 /// modifiers around a key, to press the copy chord in the first place —
-/// which is a property of the platform, and on macOS is still false:
-/// `send_chord` there answers `Unsupported`, so a toggle offered on
-/// macOS would switch on a feature that then did nothing.
+/// which every desktop platform's emitter now can: macOS was the last
+/// holdout, gated here until its `send_chord` existed, and posts the
+/// chord as `Cmd`-flagged key events since it does.
 ///
 /// Kept beside the clipboard rather than in the Settings window so
 /// there is one answer, and the window and the engine cannot disagree
 /// about it.
 pub fn selection_support() -> Result<(), ClipboardGap> {
-    if cfg!(target_os = "macos") {
-        return Err(ClipboardGap::NoCopyChord);
-    }
     clipboard().map(|_| ())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Reports whether *this* session lets a windowless process reach
-    /// the clipboard, and round-trips a marker through it if so.
-    ///
-    /// `cargo test -p poltertype-input -- --ignored --nocapture clipboard_of_this_session`
-    ///
-    /// Ignored because the answer is a property of the machine, not of
-    /// the code — and it is the answer the desktop matrix collects, one
-    /// session at a time. Asserting anything here would fail every run
-    /// on GNOME, where the honest result is "unavailable".
-    #[test]
-    #[ignore = "reports this session's real clipboard access; nothing to assert"]
-    fn clipboard_of_this_session() {
-        let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into());
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "?".into());
-        match clipboard() {
-            Err(gap) => {
-                println!("CLIPBOARD session={session} desktop={desktop} available=no gap={gap:?}");
-                println!("  reads as: {gap}");
-            }
-            Ok(cb) => {
-                let before = cb.text();
-                let marker = format!("poltertype-probe-{}", std::process::id());
-                let wrote = cb.set_text(&marker);
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let read = cb.text();
-                let ok = matches!(&read, Ok(Some(t)) if *t == marker);
-                println!(
-                    "CLIPBOARD session={session} desktop={desktop} available=yes \
-                     roundtrip={ok} wrote={:?} read_ok={}",
-                    wrote.is_ok(),
-                    read.is_ok()
-                );
-                // Put back whatever was there, so a sweep does not walk
-                // off with the session's clipboard.
-                if let Ok(Some(prev)) = before {
-                    let _ = cb.set_text(&prev);
-                }
-            }
-        }
-    }
-}
+mod tests;

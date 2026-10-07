@@ -21,50 +21,26 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::time::Duration;
 
-use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
-use core_foundation::string::{CFString, CFStringGetTypeID, CFStringRef};
+use core_foundation::base::CFTypeRef;
+use core_foundation::string::CFStringRef;
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use objc2_app_kit::NSWorkspace;
 
 use super::traits::FocusTracker;
 use super::types::{CaretHint, FocusedWindowGeometry};
 
-// AXValueType constants from HIServices/AXValue.h.
-const K_AXVALUE_TYPE_CGPOINT: u32 = 1;
-const K_AXVALUE_TYPE_CGSIZE: u32 = 2;
-const K_AXVALUE_TYPE_CGRECT: u32 = 3;
-const K_AXVALUE_TYPE_CFRANGE: u32 = 4;
+mod ax;
+mod consts;
+mod types;
 
-/// Cap on how long one AX query may block the UI event loop. An app
-/// that cannot answer within this is treated as one without a11y.
-const AX_MSG_TIMEOUT_SECS: f32 = 0.3;
-
-/// A caret with zero height is no caret — it is the empty junk rect
-/// several apps hand back instead. The cap filters the other extreme
-/// (a whole-line "selection bounds" answer).
-const MIN_CARET_HEIGHT: f64 = 0.5;
-const MAX_CARET_HEIGHT: f64 = 120.0;
-
-/// Retry budget for the focused-element query: it can race the target
-/// app's own focus-change handling and answer `cannotComplete` /
-/// `noValue` transiently (SuperDictate's resolver does the same).
-const FOCUS_RETRY_ATTEMPTS: usize = 3;
-const FOCUS_RETRY_DELAY: Duration = Duration::from_millis(40);
-
-/// Slack for the "caret belongs to its element" check: real carets
-/// stick out of the field's frame by a few points (TextEdit's search
-/// field reports one 9 pt above its frame), Chrome's junk is hundreds
-/// of points away.
-const CARET_FRAME_SLACK: f64 = 24.0;
-
-/// `CFRange` from CFBase — declared locally rather than pulling in
-/// `core-foundation-sys` for one struct.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CFRange {
-    location: isize,
-    length: isize,
-}
+use ax::{
+    ax_value, copy_attr, copy_attr_retry, copy_string_attr, element_frame, parameterized_rect,
+};
+use consts::{
+    AX_MSG_TIMEOUT_SECS, CARET_FRAME_SLACK, K_AXVALUE_TYPE_CFRANGE, MAX_CARET_HEIGHT,
+    MIN_CARET_HEIGHT,
+};
+use types::{CFRange, OwnedCF};
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -83,113 +59,6 @@ unsafe extern "C" {
     fn AXUIElementSetMessagingTimeout(element: CFTypeRef, seconds: f32) -> i32;
     fn AXValueCreate(value_type: u32, value_ptr: *const c_void) -> CFTypeRef;
     fn AXValueGetValue(value: CFTypeRef, value_type: u32, value_ptr: *mut c_void) -> bool;
-}
-
-/// An owned AX/CF reference — every successful `Copy`/`Create` call
-/// above hands us a +1 object, and this is the single place it goes
-/// back.
-struct OwnedCF(CFTypeRef);
-
-impl Drop for OwnedCF {
-    fn drop(&mut self) {
-        // Safety: balancing the +1 from the Copy/Create call this
-        // wrapper was built from; never constructed from a null.
-        unsafe { CFRelease(self.0) }
-    }
-}
-
-/// Copy an attribute, or `None` on any AX error (no permission, no
-/// focused element, app without a11y — all mean "degrade gracefully").
-fn copy_attr(element: CFTypeRef, name: &'static str) -> Option<OwnedCF> {
-    let attr = CFString::from_static_string(name);
-    let mut value: CFTypeRef = std::ptr::null();
-    // Safety: `element` is a live AX object, `value` is ours to fill.
-    let err =
-        unsafe { AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) };
-    if err != 0 || value.is_null() {
-        return None;
-    }
-    Some(OwnedCF(value))
-}
-
-fn copy_string_attr(element: CFTypeRef, name: &'static str) -> Option<String> {
-    let value = copy_attr(element, name)?;
-    // Safety: `value` is a live CF object we own; the type check keeps
-    // a non-string answer from being read as one. Get-rule wrap: the
-    // +1 stays with `value` (dropped below), the CFString wrapper
-    // retains its own.
-    unsafe {
-        if CFGetTypeID(value.0) != CFStringGetTypeID() {
-            return None;
-        }
-        Some(CFString::wrap_under_get_rule(value.0.cast()).to_string())
-    }
-}
-
-fn ax_value<T: Copy>(value: CFTypeRef, value_type: u32) -> Option<T> {
-    let mut out: T = unsafe { std::mem::zeroed() };
-    // Safety: `out` is the exact payload type `value_type` promises to
-    // write, and `value` is a live AXValue we own.
-    let ok = unsafe { AXValueGetValue(value, value_type, std::ptr::from_mut(&mut out).cast()) };
-    if ok { Some(out) } else { None }
-}
-
-/// A parameterized attribute whose answer is an AXValue-wrapped
-/// CGRect (`kAXBoundsForRange`, `AXBoundsForTextMarkerRange`).
-fn parameterized_rect(
-    element: CFTypeRef,
-    name: &'static str,
-    parameter: CFTypeRef,
-) -> Option<CGRect> {
-    let attr = CFString::from_static_string(name);
-    let mut bounds: CFTypeRef = std::ptr::null();
-    // Safety: live element, live parameter, out-pointer is ours.
-    let err = unsafe {
-        AXUIElementCopyParameterizedAttributeValue(
-            element,
-            attr.as_concrete_TypeRef(),
-            parameter,
-            &mut bounds,
-        )
-    };
-    if err != 0 || bounds.is_null() {
-        return None;
-    }
-    let bounds = OwnedCF(bounds);
-    ax_value::<CGRect>(bounds.0, K_AXVALUE_TYPE_CGRECT)
-}
-
-/// Copy an attribute with the transient-error retry — see
-/// `FOCUS_RETRY_ATTEMPTS`.
-fn copy_attr_retry(element: CFTypeRef, name: &'static str) -> Option<OwnedCF> {
-    for attempt in 0..FOCUS_RETRY_ATTEMPTS {
-        let attr = CFString::from_static_string(name);
-        let mut value: CFTypeRef = std::ptr::null();
-        // Safety: as in `copy_attr`.
-        let err = unsafe {
-            AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value)
-        };
-        if err == 0 && !value.is_null() {
-            return Some(OwnedCF(value));
-        }
-        // kAXErrorCannotComplete / kAXErrorNoValue: transient — the
-        // app's own focus handling is mid-flight. Anything else will
-        // fail the same way again; don't burn the budget on it.
-        let transient = err == -25204 || err == -25212;
-        if !transient || attempt + 1 == FOCUS_RETRY_ATTEMPTS {
-            return None;
-        }
-        std::thread::sleep(FOCUS_RETRY_DELAY);
-    }
-    None
-}
-
-fn element_frame(element: CFTypeRef) -> Option<CGRect> {
-    let origin = copy_attr(element, "AXPosition")
-        .and_then(|v| ax_value::<CGPoint>(v.0, K_AXVALUE_TYPE_CGPOINT))?;
-    let size = copy_attr(element, "AXSize")
-        .and_then(|v| ax_value::<CGSize>(v.0, K_AXVALUE_TYPE_CGSIZE))?;
-    Some(CGRect::new(&origin, &size))
 }
 
 pub struct MacosFocusTracker;
@@ -390,6 +259,13 @@ impl FocusTracker for MacosFocusTracker {
     fn backend_name(&self) -> &'static str {
         "macos-ax"
     }
+}
+
+/// `_caret_anchor` is honoured only on Linux — the AX caret is read
+/// from the app PolterType is already permitted to observe, and asking
+/// changes nothing for any other application.
+pub(crate) fn create_macos_focus_tracker(_caret_anchor: bool) -> std::sync::Arc<dyn FocusTracker> {
+    std::sync::Arc::new(MacosFocusTracker)
 }
 
 #[cfg(test)]

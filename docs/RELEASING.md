@@ -43,12 +43,46 @@ If any of those fail, fix them in a normal commit BEFORE the
 release commit. The release commit itself should only contain
 the version bump + changelog entry — nothing else.
 
+**Then look at CI on `main`, because the three commands above only
+ever saw this machine:**
+
+```bash
+gh run list --workflow=ci.yml --branch main --limit 1
+```
+
+`cargo clippy` and the pre-commit hook check the host target and
+nothing else, so a lint that only fires where a platform module is
+*not* compiled — a helper with no caller off Linux, say — is invisible
+here and fatal there. The release workflow does not catch it either:
+it builds, and building is not linting. 0.35.0 and 0.36.0 both shipped
+on top of a red `main` for exactly that reason, unnoticed for two
+releases because nobody read this line.
+
 Then **open the Settings window and look at it** — `poltertype
 --settings`, one pass over the panes. Nothing above this line can
 see the window: the brand mark was drawn as a fragment in the
 sidebar and not at all on the About card for four releases, with
 every test passing, because a renderer bug is only visible on
 screen (issue #49).
+
+**If anything under a `macos/` or `windows/` path moved, rehearse the
+build before you tag:**
+
+```bash
+gh workflow run release.yml --ref main    # ~15 min, publishes nothing
+```
+
+Nothing on a Linux machine compiles those modules — `cargo check`,
+both clippy passes and `cargo xtask style` all read straight past
+`#[cfg(target_os = …)]` — so the release workflow is the first
+compiler that ever sees them. The workflow's release job is tag-gated,
+so a dispatch on `main` builds all four installers and creates
+nothing. v0.31.0 learned this the expensive way: two visibility errors
+that exist only on macOS, each found by a tagged run, each costing a
+delete-the-tag / re-tag / wait cycle. Rehearsing would have cost the
+same waiting and left the tag alone — and it takes two rounds either
+way, since rustc stops at the first phase that fails and the second
+error was invisible until the first was gone.
 
 ## 2. Sync the docs — MANDATORY (~10 min)
 
@@ -72,7 +106,7 @@ file or convince yourself it genuinely didn't change.
 | `README.md` | anything user-facing changes — **especially the Status line, the Goals bullets, the install table, and the hotkey table** |
 | `README.<lang>.md` | the translations carry their own copy of the install table and the caveats, so **anything that changes a row of the English one changes theirs**. They hold no version numbers by design, which bounds this to structural changes: an installer added or renamed, a permission step altered, a caveat that stops being true. A translation nobody speaks is the easiest doc to leave rotting — if there is no one to update it, delete it rather than ship a lie in a language we cannot read |
 | `docs/KNOWN-GAPS.md` | it is a release blocker: re-stamp its version heading and re-verify every bullet; a gap that closed must come out, and whatever it says must match `README.md` |
-| `docs/PLAN.md` | the `Last updated:` line, the phase checkboxes, and the settings schema in §3.5 (a new `[section]` in `config.toml` belongs there) |
+| `docs/PLAN.md` | **four places, not one**: the `Last updated:` line, §10's own `Status as of vX.Y.Z` (it fell nine releases behind once), §4's repository tree — which no test reads, and which had lost five crates and misstated the platform-isolation rule by 0.33.1 — and the settings schema in §3.5 (a new `[section]` in `config.toml` belongs there), plus the phase checkboxes |
 | `docs/DECISIONS.md` | you made a call worth defending later — append an entry; don't rewrite history |
 | `docs/CODE_SIGNING.md` | a signing key is added, rotated or retired, or a platform's signing status changes — it is a **published** policy and a stale one misleads users, not just us |
 | `docs/DATA_LAYOUT.md` | the app writes a new file or directory on the user's disk |
@@ -123,11 +157,27 @@ grep -rn "no network\|no telemetry\|never.*network\|no build makes" \
 #    (Replace 0.4.2 with the version you are ABOUT to leave behind.)
 grep -rn "0\.4\.2\|v0\.4\.2" README.md docs/*.md CONTRIBUTING.md
 
-# 2. Every crate in the workspace appears in the docs that list crates.
+# 2. Every currency stamp, however far behind. Check 1 finds only the
+#    version you are leaving behind — a file that fell stale five
+#    releases ago does not contain that string, so it stays invisible
+#    to it. That is how PLAN.md's header sat at v0.31.0 and its §10
+#    roadmap at v0.24.0 while everything above passed.
+#    Resolve every hit: a dated historical claim ("mandatory as of
+#    v0.17.2") stays put, a claim of being current moves.
+grep -rnE "Last updated|Status as of|as of v?0\." \
+    README.md CONTRIBUTING.md SECURITY.md docs/*.md
+
+# 3. Every crate in the workspace appears in the docs that list crates.
 ls crates/                                   # compare against
 grep -n "poltertype-" CONTRIBUTING.md | grep -c crates
 
-# 3. Skim the diff of the release you are cutting, and ask of each
+# 4. PLAN.md §4's repository tree, against the repository. It is prose
+#    in a code fence, so no test and no lint ever reads it; by 0.33.1
+#    it had lost five of the thirteen crates and the sentence under it
+#    still said platform code is confined to two of them.
+ls crates/ docs/ .github/workflows/; ls -d */
+
+# 5. Skim the diff of the release you are cutting, and ask of each
 #    changed file: "does any doc describe this behaviour?"
 git diff --stat "$(git describe --tags --abbrev=0)"..HEAD
 ```
@@ -552,7 +602,7 @@ Update, in one `packaging: point the manifests at v$NEW` commit:
 
 `poltertype-web` resolves the latest tag from the GitHub API **at build
 time**, so in principle it follows the release on its own — the `Site`
-workflow fires a Vercel deploy hook the moment you publish. In practice
+workflow fires the site's deploy hook the moment you publish. In practice
 that call is anonymous and rate-limited per build IP, and when it is
 throttled the build silently ships `FALLBACK_VERSION` from
 `src/lib/app-release.ts` instead. That is not hypothetical: on **v0.17.1
@@ -621,7 +671,8 @@ cargo test --workspace
 # 2. SYNC THE DOCS — mandatory, own commit, before the bump.
 #    Walk the table in step 2. At minimum: README Status line +
 #    Goals bullets, `docs/KNOWN-GAPS.md`'s version heading,
-#    PLAN.md's `Last updated` + settings schema, a
+#    PLAN.md's TWO stamps (header + §10) and its §4 repository
+#    tree and settings schema, a
 #    DECISIONS.md entry, and — each its own repo — the wiki and
 #    the site if any user-facing claim moved. If the release
 #    changed what the app CAN do, grep for the old promise

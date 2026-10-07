@@ -11,9 +11,19 @@ mod consts;
 #[cfg(windows)]
 mod emitter;
 #[cfg(windows)]
+pub(crate) mod factory;
+#[cfg(windows)]
 mod gate;
 #[cfg(windows)]
 mod listener;
+#[cfg(windows)]
+mod modifiers;
+#[cfg(windows)]
+mod pointer;
+#[cfg(all(test, windows))]
+mod tests;
+#[cfg(windows)]
+mod types;
 
 #[cfg(windows)]
 pub use emitter::WindowsEmitter;

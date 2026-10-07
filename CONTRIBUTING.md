@@ -44,6 +44,7 @@ cargo build -p poltertype-app --features ai,poltertype-ai/remote
 # Lints (CI runs the same)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask style
 cargo test --workspace
 ```
 
@@ -61,6 +62,7 @@ cargo xtask help            # list available subcommands
 cargo xtask wordlists fetch # re-fetch + Hunspell-expand bundled dictionaries
 cargo xtask hooks install   # see below
 cargo xtask hooks uninstall
+cargo xtask style [<path>]  # file-organization + platform rules (below)
 cargo xtask assets icon-png <out> [--size N]   # render the app icon (the PolterType mark)
 cargo xtask assets icon-ico <out>              # …as a multi-size Windows .ico
 ```
@@ -81,7 +83,7 @@ Wires the versioned hooks under [`.githooks/`](.githooks/):
 
 | Hook | Runs | Why |
 |---|---|---|
-| `pre-commit` | `cargo fmt --all -- --check`, then clippy twice — the default feature set (what CI runs) and `--all-features` | No commits with formatter drift or lint violations, in either feature shape. |
+| `pre-commit` | `cargo fmt --all -- --check`, then clippy twice — the default feature set (what CI runs) and `--all-features` — then `cargo xtask style` | No commits with formatter drift, lint violations in either feature shape, or code in the wrong file. |
 | `pre-push` | `cargo build --workspace --all-targets` | No pushes that don't compile. |
 
 Bypass a single run with `git commit --no-verify` / `git push
@@ -239,13 +241,24 @@ function with a special case.
 
 ## Translating
 
-Two separate things can be translated, and neither needs any Rust:
+Three separate things can be translated, and none of them needs any
+Rust:
 
-* **The settings window** — one TOML file under `data/i18n/`. The whole
-  guide is [docs/TRANSLATING_THE_UI.md](docs/TRANSLATING_THE_UI.md).
+* **The settings window** — one TOML file, kept in your own config
+  directory rather than in this repository: the set of languages the
+  build ships is closed for now, and a catalog of your own works the
+  same and is yours to share. The whole guide is
+  [docs/TRANSLATING_THE_UI.md](docs/TRANSLATING_THE_UI.md).
 * **The README quick-start** — a `README.<lang>.md` beside this file.
   `README.de.md`, `README.es.md`, `README.fr.md` and `README.uk.md` are
   the shape to copy.
+* **A guide the settings window links to** — `docs/PERMISSIONS.uk.md`
+  beside the English one, plus the line in your catalog that points the
+  Setup pane's button at it. Same file, same pull request; the section
+  in [docs/TRANSLATING_THE_UI.md](docs/TRANSLATING_THE_UI.md) has the
+  one line to write. A guide is longer than a quick-start and rots the
+  same way, so the last paragraph of this section applies to it in
+  full.
 
 A quick-start is deliberately **not** a translation of the whole README.
 Translate only the parts that barely change:
@@ -300,10 +313,28 @@ language.
   own 64-line crate rather than put the first `#[cfg]` in `main.rs`
   (see `docs/DECISIONS.md`, 2026-07-29).
 
+  Inside such a crate a platform `cfg` — `target_os`, `unix`,
+  `windows`, `target_arch` — may appear in exactly **two** places:
+
+  1. on the `mod` or `use` declaration that picks the per-OS module.
+     This is the dispatch, and there is one of it per capability;
+  2. inside a file or directory already named for that OS
+     (`linux.rs`, `macos/`, `windows_impl.rs`), where it can only
+     refine a choice the module has already made — `apply/linux.rs`
+     compiles its script-building half everywhere so the tests can run
+     off-Linux, and says so with a `cfg`.
+
+  Not anywhere else. In particular a `#[cfg]` block **inside a
+  function body** that picks a backend is the shape this rule exists
+  to stop: the choice is made once, where the module is declared, not
+  again in every function that needs it. A `struct` with a per-OS
+  field is the same thing wearing a different hat — give each OS its
+  own type and let the dispatch choose.
+
   `poltertype-app` holds **none**, and `poltertype-core` holds none
-  either — both are checked by grep, not by good intentions. If you
-  find yourself reaching for `#[cfg(target_os)]` in the binary, that
-  is the signal a capability crate is missing. Where the difference is
+  either. All of this is checked by `cargo xtask style`, not by good
+  intentions. If you find yourself reaching for `#[cfg(target_os)]` in
+  the binary, that is the signal a capability crate is missing. Where the difference is
   a *value* rather than an API, prefer a runtime signal over a
   build-time one: the macOS pause-hotkey default and the Wayland
   switch-last default are both chosen from the live backend name, so
@@ -311,25 +342,60 @@ language.
 
 ## File organization (one kind of thing per file)
 
-Don't mix tests, data types, and free functions in one file. When a
-module grows past a single concern, split it into a directory module
-with these conventional file names:
+A file's **name** says what it is for, and that decides what may be
+declared in it. `cargo xtask style` checks this and the pre-commit
+hook runs it, so a violation fails the commit rather than the review.
 
 | File | Contents |
 |---|---|
 | `mod.rs` / `lib.rs` | module docs, `mod` declarations, `pub use` re-exports — wiring only |
+| `main.rs` | wiring plus `fn main`; everything it calls lives elsewhere |
 | `consts.rs` | constants |
 | `enums.rs` | enums (and their small `impl`s) |
 | `types.rs` | plain data structs (and their small `impl`s) |
+| `traits.rs` | the traits a crate is built around, and their `impl`s |
 | `<purpose>.rs` | free functions grouped by purpose (`heuristics.rs`, `helpers.rs`, `files.rs`, …) |
 | `<Type in snake_case>.rs` | a struct with substantial behaviour lives in its own file together with its `impl` (e.g. `db.rs`) |
 | `tests.rs` | **all** unit tests — never inline `#[cfg(test)] mod tests { … }` blocks in source files |
 
-When such a type file outgrows a couple of screenfuls (~400+ lines),
-promote it to its own directory module: the struct with its fields and
-constructor in one file, and the `impl` split into one block per
-concern, one file per block (fields and cross-file methods become
-`pub(super)`). Example: `crates/poltertype-core/src/engine/switcher/`
+A file that declares a type **and implements it** is that type's
+file, and the rest of this section is about what may keep it company.
+A file that only groups free functions is not — a small private struct
+holding state for one of them is part of the function, not a tenant.
+
+Four consequences, because these are the ones review kept catching:
+
+* **A constant another file can name lives in `consts.rs`.** A
+  file-private one may stay beside the code that reads it — four
+  documented gaps above the one function that places a tooltip are
+  context, not clutter. Past a handful in one file they have stopped
+  being context and become a table, and a table belongs in
+  `consts.rs`. A constant that is part of a type's API is an
+  associated `const` in its `impl` instead.
+* **One type per file, once the file belongs to a type.** A second
+  struct or enum beside a type with its own `impl`s means the file is
+  a bag — and it is a bag whether or not the second type is `pub`:
+  move plain data to `types.rs` / `enums.rs`, a seam to `traits.rs`,
+  and a second type with behaviour to its own file. In a file of free
+  functions, where no type claims the file, one exported type is still
+  the limit.
+* **A type's file is not a workshop around the type.** Up to six free
+  functions beside it read as its constructors and near helpers; a
+  seventh is a second concern that has moved in, and belongs in a
+  `<purpose>.rs` sibling. Sometimes the honest fix is the other way
+  round — the type goes to `types.rs` / `enums.rs` and the file turns
+  out to have been a function file all along.
+* **A module is found by its file name.** No `#[path = "…"]` — the
+  directory tree must be readable as the module tree, so unit tests
+  for `foo.rs` go in `foo/tests.rs`, not in `foo_tests.rs` pointed at
+  by an attribute.
+
+Past 400 lines a type file has stopped being one thing, and the
+checker says so. Promote it to its own directory module: the struct
+with its fields and constructor in one file, and the `impl` split into
+one block per concern, one file per block (fields and cross-file
+methods become `pub(super)`).
+Example: `crates/poltertype-core/src/engine/switcher/`
 (`engine.rs` — the struct; `run_loop.rs`, `echo.rs`, `decide.rs`,
 `correction.rs`, `commands.rs` — one concern each).
 
@@ -371,6 +437,18 @@ forty lines of the same argument copied into a module header.
 
 Imperative mood, scope prefix when useful (`engine:`, `win:`, `ui:`,
 `ai:`). Reference the phase or doc when the change is design-bearing.
+
+**Authorship is human.** Use whatever tools you like; the commit
+credits the people who take responsibility for the patch. So a
+`Co-authored-by:` line names someone who can be asked about the code,
+and there is no "Generated with …" footer — a contributors list is a
+list of people.
+
+CI checks it on every pull request, because a squash message is
+composed from the branch's commits and such a line in one of them
+otherwise rides into `main` unnoticed. If the check fails, drop the
+line (`git rebase -i`, or `git commit --amend` for the last one) and
+force-push the branch.
 
 ## Releasing
 

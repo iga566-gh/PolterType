@@ -15,15 +15,19 @@
 //! is event-driven and sits outside that cache entirely.
 
 mod atspi_caret;
+mod atspi_caret_geometry;
+mod atspi_caret_queries;
 mod atspi_focus;
 mod atspi_owner;
 mod cache;
 mod caret_only;
 mod consts;
+mod enums;
 mod hyprland;
 mod hyprland_ipc;
 mod pick;
 mod proc_exe;
+mod types;
 mod x11;
 
 pub(crate) use pick::*;

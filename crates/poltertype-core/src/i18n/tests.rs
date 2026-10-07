@@ -95,6 +95,46 @@ fn one_bad_entry_does_not_discard_the_good_ones() {
     assert_eq!(c.get("numeric"), None);
 }
 
+/// One line down from the entry above, and the way this actually
+/// happens: a Windows path written with single backslashes is not a
+/// valid TOML escape, and refusing the file over it took a translated
+/// interface back to English with nothing on screen to say why
+/// ([#64](https://github.com/Just-Code-NET/PolterType/issues/64)).
+#[test]
+fn a_line_the_parser_refuses_costs_that_line_not_the_language() {
+    let c = catalog(
+        r#"
+"good" = "добре"
+"commands.placeholder_path" = "C:\path\to\file.md"
+"alsogood" = "теж"
+"#,
+    );
+    assert_eq!(c.get("good"), Some("добре"));
+    assert_eq!(c.get("alsogood"), Some("теж"));
+    assert_eq!(c.get("commands.placeholder_path"), None);
+    assert!(
+        c.problems().iter().any(|p| p.contains("line 3")),
+        "the line that was lost has to be nameable: {:?}",
+        c.problems()
+    );
+}
+
+/// A catalog being filled in a line at a time is a normal catalog, not
+/// a broken one — the Settings window must not put a complaint under
+/// the picker for entries their author has simply not reached yet.
+#[test]
+fn a_catalog_reports_nothing_for_clean_or_unfinished_files() {
+    let clean = catalog("\"a\" = \"перше\"\n");
+    assert!(clean.problems().is_empty(), "{:?}", clean.problems());
+
+    let unfinished = catalog("\"a\" = \"перше\"\n\"b\" = \"\"\n");
+    assert!(
+        unfinished.problems().is_empty(),
+        "an untranslated entry is not a problem to report: {:?}",
+        unfinished.problems()
+    );
+}
+
 #[test]
 fn a_missing_directory_yields_an_empty_catalog() {
     let c = Catalog::load(std::path::Path::new("/nonexistent/poltertype/i18n"), "uk");
@@ -123,6 +163,34 @@ fn a_regional_locale_falls_back_to_the_bare_language() {
 #[test]
 fn tr_falls_back_to_english_when_uninitialised() {
     assert_eq!(tr("some.key.no.one.set", "English text"), "English text");
+}
+
+/// The catalog was written once per process, so a language picked in
+/// Settings only arrived at the next start — the window had to be
+/// reopened and the tray menu stayed in the old language until a
+/// restart. This is what both call instead.
+///
+/// `zz` because the user's own catalog directory is layered over the
+/// one this test writes, and no real config directory has that file.
+#[test]
+fn reload_puts_a_new_language_in_front_of_tr() {
+    let dir = std::env::temp_dir().join(format!("pt-i18n-reload-{}", std::process::id()));
+    let i18n = dir.join(I18N_DIR);
+    let _ = std::fs::create_dir_all(&i18n);
+    let _ = std::fs::write(i18n.join("zz.toml"), "\"test.reload\" = \"first\"\n");
+
+    assert!(reload(&dir, Some("zz"), &[]), "a first catalog is a change");
+    assert_eq!(tr("test.reload", "English"), "first");
+    assert!(
+        !reload(&dir, Some("zz"), &[]),
+        "the same files read twice are not"
+    );
+
+    let _ = std::fs::write(i18n.join("zz.toml"), "\"test.reload\" = \"second\"\n");
+    assert!(reload(&dir, Some("zz"), &[]), "an edited catalog is");
+    assert_eq!(tr("test.reload", "English"), "second");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -210,6 +278,9 @@ fn the_shipped_ukrainian_catalog_is_usable() {
         "suggestions.suggestions",
         "exceptions.exceptions",
         "setup.setup",
+        "plugins.plugins",
+        "nav.general",
+        "tray.quit",
     ] {
         let value = c.get(key);
         assert!(value.is_some(), "missing translation for `{key}`");
@@ -233,4 +304,189 @@ fn the_ukrainian_catalog_keeps_its_placeholders() {
     if let Some(v) = c.get("languages.status_restricted") {
         assert!(v.contains("{}"), "the layout count must survive: {v}");
     }
+}
+
+/// A feature whose strings reach one catalog and not the others ships
+/// translated for some users and English for the rest — which is how
+/// the plug-in query box arrived in Ukrainian alone. Every shipped
+/// catalog has to carry the same keys.
+///
+/// `docs.` keys are the deliberate exception: each names the language
+/// a linked guide has been translated into, so it exists only in the
+/// catalogs whose language that guide exists in.
+#[test]
+fn the_shipped_catalogs_agree_on_their_keys() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/i18n");
+    let mut catalogs: Vec<(&str, std::collections::BTreeSet<String>)> = Vec::new();
+    for (code, _) in SHIPPED_LOCALES {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{code}.toml"))) else {
+            // Building from a package without `data/`, as above.
+            return;
+        };
+        let parsed: toml::Table =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("{code}.toml does not parse: {e}"));
+        catalogs.push((
+            code,
+            parsed
+                .into_iter()
+                .map(|(key, _)| key)
+                .filter(|k| !k.starts_with("docs."))
+                .collect(),
+        ));
+    }
+    // Against the union rather than against one chosen catalog, so
+    // the failure names the file that is behind and not its neighbours.
+    let everything: std::collections::BTreeSet<&String> =
+        catalogs.iter().flat_map(|(_, keys)| keys).collect();
+    for (code, keys) in &catalogs {
+        let missing: Vec<_> = everything
+            .iter()
+            .filter(|key| !keys.contains(**key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{code}.toml is missing {missing:?}, which the other shipped catalogs carry"
+        );
+    }
+}
+
+// ── layering ─────────────────────────────────────────────────────────
+
+/// A directory of this test's own, cleaned up by the caller.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("pt-i18n-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn write(dir: &std::path::Path, file: &str, body: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(file), body);
+}
+
+/// The promise `docs/TRANSLATING_THE_UI.md` makes to translators: your
+/// own file overrides the shipped one, which is what makes editing and
+/// reopening the window a loop.
+#[test]
+fn a_later_source_overrides_an_earlier_one() {
+    let root = scratch("layering");
+    write(
+        &root.join("shipped"),
+        "uk.toml",
+        "\"a\" = \"перше\"\n\"b\" = \"друге\"\n",
+    );
+    write(&root.join("mine"), "uk.toml", "\"a\" = \"моє\"\n");
+
+    let c = build(
+        "uk",
+        &[
+            CatalogSource::open(root.join("shipped")),
+            CatalogSource::open(root.join("mine")),
+        ],
+    );
+    assert_eq!(c.get("a"), Some("моє"));
+    assert_eq!(c.get("b"), Some("друге"), "untouched keys survive");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// However a plug-in writes its catalog, it lands under its own
+/// namespace: an extension runs code, and relabelling PolterType's own
+/// buttons is not something it gets to do.
+#[test]
+fn a_confined_source_cannot_reach_a_key_that_is_not_its_own() {
+    let root = scratch("confined");
+    write(
+        &root.join("acme"),
+        "uk.toml",
+        "\"footer.save\" = \"викрадено\"\n\"pane.act.mode.label\" = \"Режим\"\n",
+    );
+
+    let c = build(
+        "uk",
+        &[CatalogSource::confined(root.join("acme"), "plugin.acme")],
+    );
+    assert_eq!(c.get("footer.save"), None, "a core key stays untranslated");
+    assert_eq!(c.get("plugin.acme.footer.save"), Some("викрадено"));
+    assert_eq!(c.get("plugin.acme.pane.act.mode.label"), Some("Режим"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Writing the prefix out is repetition, not a mistake — and it must
+/// not end up doubled.
+#[test]
+fn a_key_that_already_carries_its_prefix_is_left_alone() {
+    let root = scratch("prefixed");
+    write(
+        &root.join("acme"),
+        "uk.toml",
+        "\"plugin.acme.summary\" = \"Опис\"\n",
+    );
+
+    let c = build(
+        "uk",
+        &[CatalogSource::confined(root.join("acme"), "plugin.acme")],
+    );
+    assert_eq!(c.get("plugin.acme.summary"), Some("Опис"));
+    assert_eq!(c.get("plugin.acme.plugin.acme.summary"), None);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What the picker offers has to be what the loader would read — a
+/// list from anywhere else names languages nothing translates, or hides
+/// one that is sitting right there.
+#[test]
+fn every_catalog_on_disk_is_an_offered_language() {
+    let root = scratch("offered");
+    write(&root.join("shipped"), "uk.toml", "\"a\" = \"так\"\n");
+    write(&root.join("mine"), "pt_BR.toml", "\"a\" = \"sim\"\n");
+    // Not languages: a plug-in's own README, and a note beside it.
+    write(&root.join("mine"), "notes.toml", "\"a\" = \"x\"\n");
+    write(&root.join("mine"), "README.md", "not a catalog\n");
+
+    let offered = installed_locales(&[
+        CatalogSource::open(root.join("shipped")),
+        CatalogSource::open(root.join("mine")),
+    ]);
+    let codes: Vec<&str> = offered.iter().map(|(code, _)| code.as_str()).collect();
+    assert_eq!(codes, vec!["pt_BR", "uk"]);
+
+    // A locale PolterType has a name for is offered by name; one it
+    // does not is offered by its code rather than hidden.
+    assert_eq!(offered[1].1, "Українська");
+    assert_eq!(offered[0].1, "pt_BR");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The point of letting a plug-in ship translations: a language nobody
+/// has translated the rest of the interface into still reaches the pane
+/// that plug-in drew.
+#[test]
+fn a_plugin_can_offer_a_language_the_app_does_not_ship() {
+    let root = scratch("unshipped");
+    let _ = std::fs::create_dir_all(root.join("shipped"));
+    write(
+        &root.join("acme"),
+        "pl.toml",
+        "\"summary\" = \"Odpowiada na czaty\"\n",
+    );
+
+    let c = build(
+        "pl_PL",
+        &[
+            CatalogSource::open(root.join("shipped")),
+            CatalogSource::confined(root.join("acme"), "plugin.acme"),
+        ],
+    );
+    assert_eq!(c.get("plugin.acme.summary"), Some("Odpowiada na czaty"));
+    assert!(
+        SHIPPED_LOCALES.iter().all(|(code, _)| *code != "pl"),
+        "the point of this test is a locale PolterType does not ship"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

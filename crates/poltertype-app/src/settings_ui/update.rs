@@ -2,10 +2,12 @@
 
 use iced::Task;
 use iced::widget::text_editor;
+use poltertype_core::i18n::{tr, tr_args};
 use poltertype_core::plugins::SettingValue;
 use poltertype_core::settings::{MIN_UPDATE_INTERVAL_HOURS, Settings, SettingsStore};
 use tracing::{info, warn};
 
+use super::doc_links;
 use super::enums::*;
 use super::helpers::*;
 use super::plugin_pane::{CommandOutput, Slot, Typing};
@@ -110,12 +112,16 @@ impl SettingsApp {
                 // named as the row's identity is empty.
                 let Some(id) = pane.record_id(index, row) else {
                     pane.status = Some(
-                        "This one has no name yet — give it one before acting on it.".to_owned(),
+                        tr(
+                            "plugins.row_unnamed",
+                            "This one has no name yet — give it one before acting on it.",
+                        )
+                        .to_owned(),
                     );
                     return Task::none();
                 };
                 pane.set_action_running(Some((index, row)));
-                pane.status = Some(format!("Running “{id}”…"));
+                pane.status = Some(tr_args("plugins.running", "Running “{}”…", &[&id]));
                 let ext = pane.ext.clone();
 
                 // Waited on off the UI thread: the action behind such a
@@ -147,12 +153,16 @@ impl SettingsApp {
                         // The plug-in's own words: it is the only thing
                         // here that knows whether the message went.
                         Ok(text) if !text.trim().is_empty() => first_lines(text, 3),
-                        Ok(_) => format!("“{id}” finished without saying anything."),
+                        Ok(_) => tr_args(
+                            "plugins.finished_silently",
+                            "“{}” finished without saying anything.",
+                            &[&id],
+                        ),
                         // The plug-in usually names the row itself —
                         // saying it twice reads as two different things
                         // having gone wrong.
                         Err(why) if why.contains(id.as_str()) => why.clone(),
-                        Err(why) => format!("“{id}”: {why}"),
+                        Err(why) => tr_args("plugins.action_failed", "“{}”: {}", &[&id, why]),
                     });
                     // The reports on this group are out of date — the
                     // action just changed them. Only the reports:
@@ -213,6 +223,14 @@ impl SettingsApp {
                         pane.set_output(slot, state.clone());
                     }
                 }
+            }
+            Message::PluginQueryTyped(plugin, index, text) => {
+                if let Some(pane) = self.plugins.get_mut(plugin) {
+                    pane.set_query(index, text);
+                }
+            }
+            Message::PluginQueryAsked(plugin, index) => {
+                return self.ask_query(plugin, index);
             }
             Message::PluginCommandClicked(plugin, command) => {
                 if let Some(pane) = self.plugins.get(plugin) {
@@ -347,7 +365,11 @@ impl SettingsApp {
                     self.command_draft_param.clear();
                     self.command_draft_apps.clear();
                     self.command_status = Some(SaveBanner {
-                        text: "Added. Press Save to persist, then restart poltertype.".into(),
+                        text: tr(
+                            "commands.added",
+                            "Added. Press Save to persist, then restart poltertype.",
+                        )
+                        .into(),
                         is_error: false,
                     });
                 }
@@ -363,7 +385,7 @@ impl SettingsApp {
                     let removed = self.settings.commands.remove(idx);
                     info!(id = %removed.id, "removed user command from UI");
                     self.command_status = Some(SaveBanner {
-                        text: format!("Removed `{}`.", removed.id),
+                        text: tr_args("commands.removed", "Removed `{}`.", &[&removed.id]),
                         is_error: false,
                     });
                 }
@@ -416,6 +438,9 @@ impl SettingsApp {
             }
             // ── Suggestions ──────────────────────────────────────
             Message::SuggestionsToggled(b) => self.settings.suggestions.enabled = b,
+            Message::SuggestionCaretAnchorToggled(b) => {
+                self.settings.suggestions.caret_anchor = b;
+            }
             // Guarded rather than trusted: the pane disables the
             // toggle where the session cannot do this, and a message
             // that arrives anyway must not write a setting the app
@@ -453,15 +478,30 @@ impl SettingsApp {
                 self.settings.general.tray_icon = choice.config_value().to_owned();
             }
 
+            Message::ReplaySpeedChanged(choice) => {
+                self.settings.engine.replay_speed = choice.config_value().to_owned();
+            }
+
+            Message::UiLanguageChanged(code) => {
+                self.settings.general.ui_language = code;
+                self.apply_ui_language();
+            }
+
             Message::ManualOnlyChosen(manual) => {
                 self.settings.general.paused = manual;
                 self.conversion_chosen_here = true;
             }
 
-            Message::ResetDefaults => self.settings = Settings::default(),
+            Message::ResetDefaults => {
+                self.settings = Settings::default();
+                self.apply_ui_language();
+            }
             Message::Reload => match SettingsStore::load_or_default() {
                 Ok(fresh) => {
                     self.settings = fresh.snapshot();
+                    // Before the banner below is phrased, so it is
+                    // already in the language the file asks for.
+                    self.apply_ui_language();
                     // Reload means one thing everywhere: every
                     // on-disk-backed view resets to what is on disk.
                     // Unsaved editor content is discarded by design.
@@ -476,13 +516,17 @@ impl SettingsApp {
                         self.wordlist_status = None;
                     }
                     self.save_banner = Some(SaveBanner {
-                        text: "Reloaded from disk.".into(),
+                        text: tr("footer.reloaded", "Reloaded from disk.").into(),
                         is_error: false,
                     });
                 }
                 Err(e) => {
                     self.save_banner = Some(SaveBanner {
-                        text: format!("Reload failed: {e}"),
+                        text: tr_args(
+                            "footer.reload_failed",
+                            "Reload failed: {}",
+                            &[&e.to_string()],
+                        ),
                         is_error: true,
                     });
                 }
@@ -512,14 +556,22 @@ impl SettingsApp {
                     Ok(()) => {
                         info!(path = ?self.config_path, "settings saved from UI");
                         self.save_banner = Some(SaveBanner {
-                            text: format!("Saved to {}.", self.config_path.display()),
+                            text: tr_args(
+                                "footer.saved_to",
+                                "Saved to {}.",
+                                &[&self.config_path.display().to_string()],
+                            ),
                             is_error: false,
                         });
                     }
                     Err(e) => {
                         warn!(?e, "settings save failed");
                         self.save_banner = Some(SaveBanner {
-                            text: format!("Save failed: {e}"),
+                            text: tr_args(
+                                "footer.save_failed",
+                                "Save failed: {}",
+                                &[&e.to_string()],
+                            ),
                             is_error: true,
                         });
                     }
@@ -564,23 +616,33 @@ impl SettingsApp {
             // ── Setup pane ─────────────────────────────────────────
             Message::SetupRecheck => {
                 let before = self.setup.clone();
-                self.setup = poltertype_input::setup::probe_setup();
+                self.setup = poltertype_input::setup::probe_setup(
+                    &self.store.snapshot().updates.local_signing_identity,
+                );
                 // Say something either way: a button that silently
                 // redraws the same screen reads as broken, and "still
                 // not granted" is what the user most needs to hear.
                 self.setup_status = Some(if self.setup == before {
                     SaveBanner {
                         text: if self.setup.needs_attention() {
-                            "Checked — nothing has changed yet.".to_owned()
+                            tr(
+                                "setup.checked_unchanged",
+                                "Checked — nothing has changed yet.",
+                            )
+                            .to_owned()
                         } else {
-                            "Checked — everything is in place.".to_owned()
+                            tr("setup.checked_ready", "Checked — everything is in place.")
+                                .to_owned()
                         },
                         is_error: false,
                     }
                 } else {
                     SaveBanner {
-                        text: "Checked — something changed. Restart PolterType to pick it up."
-                            .to_owned(),
+                        text: tr(
+                            "setup.checked_changed",
+                            "Checked — something changed. Restart PolterType to pick it up.",
+                        )
+                        .to_owned(),
                         is_error: false,
                     }
                 });
@@ -588,18 +650,22 @@ impl SettingsApp {
             Message::SetupOpen(url) => {
                 // `opener` hands http(s) docs links and macOS
                 // `x-apple.systempreferences:` deep links alike to the
-                // OS handler.
+                // OS handler. Every guide this window opens goes
+                // through here, including the ones the per-OS probe
+                // built — which is why the language swap lives at the
+                // point of opening rather than at each button.
+                let url = doc_links::localized(&url);
                 if let Err(e) = opener::open(&url) {
                     warn!(?e, %url, "could not open setup link");
                     self.setup_status = Some(SaveBanner {
-                        text: format!("Couldn't open {url}"),
+                        text: tr_args("setup.open_failed", "Couldn't open {}", &[&url]),
                         is_error: true,
                     });
                 }
             }
             Message::SetupCopy(command) => {
                 self.setup_status = Some(SaveBanner {
-                    text: format!("Copied: {command}"),
+                    text: tr_args("setup.copied", "Copied: {}", &[&command]),
                     is_error: false,
                 });
                 return iced::clipboard::write(command);
@@ -610,11 +676,82 @@ impl SettingsApp {
                 // return value is not an answer — re-probe instead of
                 // believing it.
                 poltertype_input::setup::request_permission(permission);
-                self.setup = poltertype_input::setup::probe_setup();
+                // And open the pane regardless: when TCC has no record
+                // the dialog appears over it, and when the app is not
+                // in the list at all the user is already where the
+                // "+" button lives — never a silent no-op
+                // in front of an empty list.
+                if let Some(url) = poltertype_input::setup::permission_settings_url(permission) {
+                    let _ = opener::open(url);
+                }
+                self.setup = poltertype_input::setup::probe_setup(
+                    &self.store.snapshot().updates.local_signing_identity,
+                );
                 self.setup_status = Some(SaveBanner {
-                    text: "Asked the system. Approve it there, then press Check again.".to_owned(),
+                    text: tr(
+                        "setup.asked_system",
+                        "Asked the system. Approve it there, then press Check again.",
+                    )
+                    .to_owned(),
                     is_error: false,
                 });
+            }
+
+            Message::SetupLocalSigning => {
+                // Adopt-or-create in the keychain, then remember the name:
+                // the updater reads it at swap time, and the re-probe below
+                // is what flips the step to Done.
+                let name = {
+                    let configured = self.store.snapshot().updates.local_signing_identity;
+                    if configured.is_empty() {
+                        poltertype_input::setup::DEFAULT_LOCAL_SIGNING_IDENTITY.to_owned()
+                    } else {
+                        configured
+                    }
+                };
+                match poltertype_input::setup::setup_local_signing(&name) {
+                    Ok(()) => {
+                        if let Err(e) = self
+                            .store
+                            .update(|s| s.updates.local_signing_identity = name.clone())
+                        {
+                            warn!(?e, "could not remember the signing identity");
+                        }
+                        self.setup_status = Some(SaveBanner {
+                            text: tr_args(
+                                "setup.identity_stored",
+                                "Identity “{}” is in your keychain — updates will keep \
+                                 the permissions from now on.",
+                                &[&name],
+                            ),
+                            is_error: false,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(%e, "local signing setup failed");
+                        self.setup_status = Some(SaveBanner {
+                            text: tr_args(
+                                "setup.signing_failed",
+                                "Could not set up signing: {}",
+                                &[&e.to_string()],
+                            ),
+                            is_error: true,
+                        });
+                    }
+                }
+                self.setup = poltertype_input::setup::probe_setup(
+                    &self.store.snapshot().updates.local_signing_identity,
+                );
+            }
+
+            Message::RestartApp => {
+                // The settings window is a child of the tray process,
+                // and the relaunch only lands once this process is
+                // gone — so exit the moment the shell has arranged it.
+                if poltertype_shell::restart_app() {
+                    std::process::exit(0);
+                }
+                warn!("restart from the pane is wired for unix only so far");
             }
 
             Message::WindowCloseRequested(id) => {
@@ -645,11 +782,13 @@ impl SettingsApp {
         if !is_usable_hotkey(&combo) {
             warn!(?kind, %combo, "refusing a hotkey this build cannot read back");
             self.save_banner = Some(SaveBanner {
-                text: format!(
-                    "{combo} can't be used as a hotkey. \
+                text: tr_args(
+                    "hotkeys.unusable_combo",
+                    "{} can't be used as a hotkey. \
                      Try a Latin letter or a function key — \
                      a key is stored by the character it types, \
-                     so switch layout first if you meant a letter."
+                     so switch layout first if you meant a letter.",
+                    &[&combo],
                 ),
                 is_error: true,
             });
@@ -727,6 +866,76 @@ impl SettingsApp {
             },
             move |outcome| Message::PluginOutputLoaded(plugin, slots.clone(), outcome),
         )
+    }
+
+    /// Ask a plug-in the question typed into one of its query boxes.
+    ///
+    /// The same shape as [`Self::load_output`] and answered by the same
+    /// message, so the answer lands in the same box a report's would and
+    /// is drawn by the same code. What differs is the one argument the
+    /// plug-in is handed, and that it is only ever sent because somebody
+    /// pressed Ask.
+    pub(super) fn ask_query(&mut self, plugin: usize, index: usize) -> Task<Message> {
+        let slot = Slot::control(index);
+        let Some(pane) = self.plugins.get_mut(plugin) else {
+            return Task::none();
+        };
+        let query = pane.query(index).trim().to_owned();
+        // Before the box is put into its asking state, not after: a
+        // question that was never going to leave this process should not
+        // flash "asking the plug-in…" on its way to being refused.
+        if let Some(why) = crate::plugins::query_refusal(&query) {
+            if !query.is_empty() {
+                pane.set_output(slot, CommandOutput::Failed(why));
+            }
+            return Task::none();
+        }
+        let Some(command) = pane.command_id(slot).map(str::to_owned) else {
+            return Task::none();
+        };
+        let ext = pane.ext.clone();
+        pane.set_output(slot, CommandOutput::Loading);
+
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::plugins::ask_query(&ext, &command, &query));
+        });
+        Task::perform(
+            async move {
+                rx.await
+                    .unwrap_or_else(|_| Err("the query task went away".to_owned()))
+            },
+            move |outcome| Message::PluginOutputLoaded(plugin, vec![slot], outcome),
+        )
+    }
+
+    /// Show the window in the language the settings now name, without
+    /// waiting for it to be saved and reopened.
+    ///
+    /// `view` is rebuilt from scratch every frame, so swapping the
+    /// catalog is the whole of it for PolterType's own text. A
+    /// plug-in's pane is drawn from a manifest translated when it was
+    /// read, and the keys are derived from the labels — so a translated
+    /// manifest cannot be translated again, and those are re-read from
+    /// disk instead. The values already on screen are the user's, not
+    /// the manifest's, and are left alone.
+    fn apply_ui_language(&mut self) {
+        let Ok(data_dir) = poltertype_core::resolve_data_dir() else {
+            return;
+        };
+        let catalogs = poltertype_core::plugins::catalog_sources(&data_dir);
+        if !poltertype_core::i18n::reload(
+            &data_dir,
+            Some(&self.settings.general.ui_language),
+            &catalogs,
+        ) {
+            return;
+        }
+        for fresh in poltertype_core::plugins::extensions(&data_dir) {
+            if let Some(pane) = self.plugins.iter_mut().find(|p| p.ext.id == fresh.id) {
+                pane.ext = fresh;
+            }
+        }
     }
 
     /// The single shared "save the wordlist now" path — per-pane Save,

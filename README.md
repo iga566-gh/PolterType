@@ -18,7 +18,7 @@ typed on an English layout comes out as `ma;ana` — PolterType fixes the
 word the moment it ends and switches the layout with it, so `por la
 tarde` lands correctly as typed.*
 
-> **Status: v0.29.0**, out of beta since v0.1.0. Windows, macOS and
+> **Status: v0.36.4**, out of beta since v0.1.0. Windows, macOS and
 > Linux (Wayland and X11, on the desktops in the table below) all
 > correct words end to end, and the spelling-suggestions tooltip
 > renders on all three. Installers are **unsigned**, so first launch
@@ -52,6 +52,12 @@ hotkeys, smart commands, wordlists, and per-app exceptions.*
   a second explicit toggle to reach the network at all.
 - **Configurable** — autostart, per-language allowlist, per-app
   exceptions, hotkeys, sound themes.
+- **Speaks your language** — the window and the tray menu ship in
+  English, German, Spanish, French and Ukrainian, picked in Settings
+  and applied without a restart. Adding one of your own is a single
+  TOML file and no rebuild, and the same file can send the Setup
+  pane's guide to a translation of it: see
+  [docs/TRANSLATING_THE_UI.md](docs/TRANSLATING_THE_UI.md).
 - **Open source** — MIT licensed.
 
 ## Platforms
@@ -158,7 +164,10 @@ Two caveats worth stating plainly:
 ## Stack
 
 - Pure Rust — no WebView, no Node.
-- `tao` event loop + `tray-icon` + `global-hotkey` + `single-instance`.
+- `tao` event loop + `global-hotkey` + `single-instance`; `tray-icon`
+  for the tray on Windows and macOS and for the menus everywhere, with
+  the Linux indicator driven against `libayatana-appindicator`
+  directly since v0.32.0.
 - `ureq` + `rustls` + `sha2` for the updater, plus `ed25519-dalek` to
   check the release manifest's signature (verification only; the app
   holds no secret).
@@ -187,7 +196,7 @@ the Settings window:
 | Default                | Action                                                                                            |
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
 | `Ctrl+Shift+Space`     | Pause / resume auto-switching.                                                                    |
-| `Ctrl+Shift+Backspace` | Force-switch a word — the one you are still typing, or the most recent finished one if you have moved past it. Ignores every filter, including the dev-friendly skips below, and works while auto-switching is paused. On a word PolterType *just corrected* it undoes that correction, and learns the word so it won't happen again — unless the correction rested on a real word of the other language, in which case putting it back is a one-off rather than a new dictionary entry. Press it again and the word moves on to the next layout, wrapping: with two layouts that is simply back again, so a press made in error costs one more press. Only that first undo teaches anything. With no word to act on it converts the separator the caret is sitting after instead — `№` ↔ `#` — leaving alone the ones that read the same under both layouts, and `Enter` and `Tab`. |
+| `Ctrl+Shift+Backspace` | Force-switch a word — the one you are still typing, or the most recent finished one if you have moved past it. Ignores every filter, including the dev-friendly skips below, and works while auto-switching is paused. On a word PolterType *just corrected* it undoes that correction, and learns the word so it won't happen again — unless the correction rested on a real word of the other language, in which case putting it back is a one-off rather than a new dictionary entry. Press it again and the word moves on to the next layout, wrapping: with two layouts that is simply back again, so a press made in error costs one more press. Only that first undo teaches anything. With no word to act on it converts the separator the caret is sitting after instead — `№` ↔ `#` — leaving alone the ones that read the same under both layouts, and `Enter` and `Tab`. Moving the caret gives it nothing to act on: an arrow, `Home`/`End`, select-all or a click — with or without a modifier — means the word is no longer where a correction would land, so the press converts your selection instead if `[selection]` is on, and otherwise does nothing. |
 
 > **On macOS the pause default is `Ctrl+Shift+P`.** `Ctrl+Space` and
 > `Ctrl+Shift+Space` are macOS's own "previous / next input source"

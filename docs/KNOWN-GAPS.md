@@ -1,4 +1,4 @@
-# Known gaps (as of v0.29.0)
+# Known gaps (as of v0.36.4)
 
 Things a reader of the docs might reasonably assume work, but don't.
 Check here before promising any of them (especially on the website).
@@ -12,6 +12,351 @@ three releases without a stamp (0.14.3 → 0.17.2), which is what the
 sentence above exists to prevent.
 
 ## What each release pass actually checked
+
+**What the 0.36.4 pass actually checked (2026-09-30).** On **KDE
+Plasma 6 Wayland** in the desktop-matrix guest, with the key gate
+holding (keyd stopped, so nothing proxies our emitter), and nowhere
+else — issue #74's sequence, filed from Hyprland.
+
+A wrong-layout word closed by a space held like a finger, then one more
+space tap: 0.36.3 kept both spaces in 8 of 8 rounds with a 30 ms tap,
+1 of 8 with a 150 ms press, 0 of 8 with 300 ms; this build, 8 of 8 in
+all three. The failure is libinput's, so every Wayland compositor is
+exposed the same way, but **Hyprland — the reporter's — was not
+re-run**: this machine runs keyd, which proxies our emitter and turns
+the gate off, so the bug cannot happen here at all. Nor was
+input-remapper, the reporter's remapper.
+
+Issue #72 was re-run against 0.36.3 on the same session, and stays
+open: an `Alt+Tab` between two windows, a second's pause, a word and
+the hotkey converted 24 of 24 across Electron (native Wayland and
+XWayland), an XWayland terminal and far2l's terminal mode, with keyd
+proxying the keyboard. What the reporter has and this did not —
+InputActions, Telegram, far2l's GUI backend — is unmeasured. Nothing
+else below was re-measured.
+
+**What the 0.36.3 pass actually checked (2026-09-25).** On **KDE
+Plasma 6 Wayland** in the desktop-matrix guest, and nothing else — the
+sequence issue #72 turned out to be.
+
+With KWin keeping a layout per window, two terminals, and `Alt+Tab`
+between them followed by a word 50, 150 or 300 ms later: the new
+window's layout lands about 70 ms after `Alt` comes up, and a word
+begun before that was filed under the old window's. Eight rounds per
+delay, the manual hotkey and the automatic pass run separately. 0.36.2
+converted 19 of 24 by hotkey and corrected 21 of 24 on its own, every
+miss at 50 or 150 ms; this build, 24 of 24 in both. With KDE's default,
+one layout for everything, 0.36.2 already converted 20 of 20 — the bug
+needs a layout that changes with the window. A pasted image (the first
+form of the report) was run on the same session before the cause was
+known and converted every time, which is consistent: `wl-copy` into a
+terminal opens no new window.
+
+Not measured: the reporter's own stack (keyd, InputActions, Telegram,
+far2l) — they saw it fail more often than not, so their compositor is
+slower to apply the layout than the guest's, and the half-second window
+is a margin chosen for that rather than a measured bound. A word typed
+entirely inside the compositor's delay and not touched again for half
+a second keeps the old window's layout. Hyprland with a per-window
+layout script — this machine's own set-up — has the same shape and was
+not re-run. Nothing else below was re-measured.
+
+**What the 0.36.2 pass actually checked (2026-09-19).** The Linux
+tray's fallback path on **Hyprland/Wayland**, this machine, and nothing
+else — the one sequence issue #73 is about.
+
+An inert instance (scratch XDG directories, paused, updater off) was
+started on a private D-Bus session with no StatusNotifierItem host on
+it, so the tray library fell back to a `GtkStatusIcon`; a stub host was
+then brought up, which is what frees that icon; the tooltip text was
+then changed a dozen times by flipping `ui_language`. The 0.36.1 build
+segfaults on the sixth change, with the reported backtrace frame for
+frame. The same run against this build survives and logs the stale
+handler being dropped once. A C program making the same library calls
+gives the same before/after, which is where the mechanism was read.
+
+Not measured: whether the fallback icon is of any use on Wayland in the
+first place (it is created defective there — GTK logs
+`gtk_widget_get_scale_factor: GTK_IS_WIDGET failed` the moment it
+appears — and PolterType does not change that), and the X11 XEmbed
+tray, where the same fallback is the real thing and the crash sequence
+should be identical. Nothing else below was re-measured.
+
+**What the 0.36.1 pass actually checked (2026-09-17).** On
+**Hyprland/Wayland with keyd**, this machine, and nowhere else — a
+single path, the one issue #72 is about.
+
+A 1×1 PNG was put on the clipboard, pasted into a text editor (which
+inserts nothing, the report's own situation), a word typed 472 ms
+later, and the manual switch hotkey pressed. The word converted, and
+the log shows the paste window still declining the automatic pass. The
+engine's own harness covers the before/after: the hotkey emits nothing
+inside the window on 0.36.0 and converts on 0.36.1.
+
+Not re-measured this release: every other row below. The report came
+from **Debian 13 KDE Wayland**, which was not re-tested — the change is
+in the engine's word bookkeeping and touches no per-desktop code, but
+that is reasoning, not a measurement.
+
+**What the 0.36.0 pass actually checked (2026-09-10).** On
+**Hyprland/Wayland with keyd**, this machine, and nowhere else.
+
+The manual switch, timed from outside the app. The latency was read
+off PolterType's own emitted key events — through keyd's virtual
+keyboard, which is where they surface, since keyd holds our emitter
+exclusively — using the kernel's timestamps, so the numbers do not
+depend on any log line and the same measurement runs against an
+unpatched binary. A six-letter word, `hold_keys = false`, from the
+trigger key rising to the first emitted key and to the last:
+
+| build | first key | whole burst |
+|---|---|---|
+| 0.35.0, `normal` | 172 ms | 320 ms |
+| 0.36.0, `normal` | 70 ms | 217 ms |
+| 0.36.0, `fast` | 40 ms | 144 ms |
+| 0.36.0, `instant` | 25 ms | 82 ms |
+
+The app's own new timing line agrees and says where the rest goes: at
+`normal`, 1 ms switching, 60 ms waiting for the key stream to settle,
+**0 ms** verifying (80 ms before this release), 184 ms emitting.
+
+The gear changing without a restart, verified the way a user would hit
+it: `replay_speed` was rewritten in `config.toml` under a running app,
+which logged `config.toml changed on disk; applying it`, and the next
+measurement moved to the new numbers with no restart in between.
+
+The tray tooltip's two fields, read where a panel reads them: with
+waybar as the StatusNotifierHost and libayatana-appindicator 0.6.0
+installed, the item's `ToolTip` property is
+`"" 0 "PolterType" "uk-UA"` — the name in the title, the state in the
+description. That is issue #59's follow-up closed by reading the
+property rather than by looking at a rendered tooltip.
+
+What this pass did **not** check: **KDE Plasma Wayland**, which is
+where issue #71 was reported. The changed code is desktop-independent
+— the 80 ms belonged to a backend answering "cannot tell", which KDE's
+does — but the reporter's own total also contains KDE's D-Bus switch
+cost and an InputActions + keyd stack that may hold a modifier release
+longer than this machine does. That last case is now visible in a
+debug log rather than inferred. MATE was not re-run either; that its
+protection survives is covered by a unit test counting the readings,
+not by a live session. Windows and macOS never ran this build: the
+pacing half of `replay_speed` does nothing on either by construction,
+while the settle half applies everywhere and was measured only here.
+The tooltip split was not seen rendered on Plasma. No other bullet
+below was re-measured — read them as the 0.35.0 pass left them.
+
+**What the 0.35.0 pass actually checked (2026-09-09).** On **Cinnamon
+X11** in the desktop-matrix guest, and on `ubuntu:24.04` — the release
+runner's own image — for the packaging half.
+
+The popup on two monitors, live. VirtualBox will not light a second
+virtual head here, but RandR lets a *monitor* be declared over part of
+the screen, and a declared monitor is exactly what `GetMonitors`
+returns, which is all this code reads. With the guest's 1280×800 screen
+split into two 640-wide monitors, the tooltip mapped at x=220 with a
+width of 200 — wholly inside the left one. Centred in the root, which
+is what every release before this did, it would have started at 540 and
+been drawn across the seam at 640. That is issue #70 reproduced and
+fixed on a live server; the test that does it lives in the popup crate,
+`#[ignore]`d with the `xrandr --setmonitor` lines in its doc comment.
+The caret and focused-window anchors are covered by unit tests against
+the reporter's own geometry (1920×1080+0+120 beside 1920×1200+1920+0)
+and were **not** run against a server.
+
+The tray tooltip end to end, twice in one session (issue #59). Against
+the guest's own libayatana-appindicator **0.5.94** — the version Debian
+13 ships and the AppImage has been bundling — the app logs "tray
+library has no tooltip API" and the item's `ToolTip` property cannot be
+read at all. Against **0.6.0 built exactly as `build-appimage.sh` now
+builds it**, the same property reads `PolterType — ru-RU`. The library
+build was also run on the runner's image, where the system copy exports
+zero tooltip symbols and the built one exports seven.
+
+The replay pacing, measured rather than argued (issue #67). Seven
+backspaces and seven keys through a real uinput device in the guest:
+**152 ms** at `normal`, **100 ms** at `fast`, **77 ms** at `instant`.
+The first two match the constants almost exactly; the third does not —
+with the pacing gone, what is left is the boundary guards, which should
+be ~44 ms and measured 77, so read the guest's timers as coarse and the
+instant figure as an upper bound. The measurement is a `#[ignore]`d
+test, so it can be repeated on real hardware.
+
+What this pass did **not** check: the AppImage itself, on any machine —
+the packaging change is verified by the library build and the property
+read above, plus the build script's own two assertions, not by
+installing a built AppImage on Debian 13. Windows and macOS never ran
+this build; `replay_speed` does nothing on either by construction. No
+other bullet below was re-measured — read them as the 0.34.x passes
+left them.
+
+**What the 0.34.1 pass actually checked (2026-09-08).** Bug-fix-only
+release — two fixes from contributor PRs. The selection-direction fix
+(#68) is platform-neutral (`poltertype-core` only), verified by three
+regression tests and the full 407-test suite. The Windows modifier
+snapshot fix (#69) was measured by the contributor on Windows Server 2025
+over RDP: manual switches that previously stalled 1.5–5 s now take
+0.13–0.26 s, and selection conversion works on the first press. No gaps
+were added or closed; every existing bullet re-verified against the
+current code.
+
+**What the 0.34.0 pass actually checked (2026-09-07).** On **Cinnamon
+X11**, in the desktop-matrix guest — which is where the X11 listener
+rewritten in 0.33.2 could finally be run at all. The full sweep passes:
+a word typed under the wrong layout arrives corrected *in the
+application*, the manual hotkey undoes it and puts it back, the pause
+chord fires, the layout normalises. The same session measured that
+listener idling at **0.05 % of a core**, which is the figure 0.33.2
+claimed on the evdev side and could not test here.
+
+On that session, two more: the manual hotkey pressed after
+`Ctrl+Shift+←` performs no correction, while the same hotkey after
+`Ctrl+S` still does (issue #65); and the AT-SPI caret watcher's thread
+is present with `caret_anchor = true`, absent with it `false`, and
+absent again with the tooltip itself switched off (issue #66).
+
+**Not checked: Telegram's banner.** Cinnamon raises
+`org.a11y.Status.IsEnabled` for its own reasons before PolterType
+starts, so on that desktop the flag cannot be attributed to us either
+way. What was verified is the cause — that PolterType no longer joins
+the accessibility bus when nothing wants a caret. The symptom itself
+rests on the reporter's account.
+
+**What the 0.33.2 pass actually checked (2026-09-07).** The idle cost
+of the input loop, on **Linux/Wayland** (Hyprland, evdev) on the
+development laptop, measured on the shipped 0.33.1 AppImage and on this
+build with the engine paused and nothing typed: 0.55 % of a core and
+502 context switches a second before, 0.05 % and 38 after, all of it in
+the `poltertype-input` thread both times. Corrections were then checked
+live in both directions on the new build — `yjdbyf` → `новина` with the
+layout switched to uk-UA, then the `hello` keys back to en-US — because
+a loop that waits instead of spinning is only cheaper if it still
+delivers every keystroke. **Not checked on X11**, whose loop changed the
+same way and is covered by nothing but its unit tests here: this machine
+has no X session. The key gate's own wake path is unit-tested rather
+than exercised, because keyd proxies our emitter on this machine and the
+gate turns itself off.
+
+**What the 0.33.1 pass actually checked (2026-09-07): nothing new,
+because nothing changed.** That release carries no change to the
+program — it exists so the tag points at a tree that passes the
+project's own lint. Every bullet below stands exactly as the 0.33.0
+pass left it, and the stamp above moved only so the heading is not
+claiming to describe an older release than the one shipping.
+
+**What the 0.33.0 pass actually checked (2026-09-07).** The Commands
+pane's three greyed examples, on **Hyprland/Wayland** on the
+development laptop: with the interface in Ukrainian all three drew out
+of `uk.toml` — including the path one, whose backslashes survive TOML
+escaping — and the same build asked for English drew the English. The
+four shipped catalogs are 279 keys each and a test now fails the build
+when they stop agreeing on which keys they carry.
+
+**A guide in another language has never been opened, because none
+exists.** The mechanism added for issue #61 is covered by tests,
+including one that writes a catalog to disk, loads it and reads the
+address that comes out — but no `PERMISSIONS.<lang>.md` has been
+written, so nothing has yet followed that address to a real page on
+GitHub. What ships is the way to add one, not a translated guide.
+
+What this pass did **not** check: the macOS and Windows panes, the
+tray, and anything the 0.32.1 and 0.32.0 passes covered — read those
+below as they left them.
+
+**What the 0.32.1 pass actually checked (2026-09-06).** The Setup
+pane's own rows — until this release the one part of the window no
+catalog could reach. On **Hyprland/Wayland** on the development
+laptop, with the interface in Ukrainian: both Linux steps drew their
+title, their explanation and their button out of `uk.toml`, and the
+same build asked for English drew them in English, unchanged from
+0.32.0. The four shipped catalogs were re-checked the
+way the 0.31.0 pass checked them — 273 keys each now, none missing,
+every `{}` count matching the English at the call site.
+
+What this pass did **not** check: the macOS and Windows rows. Their
+text moved the same way and CI compiles it on those runners, but
+neither pane was drawn on either OS, and on Linux the compiler does
+not even read those modules. The tray was not re-measured either —
+read every bullet below as the 0.32.0 and 0.31.0 passes left them.
+
+**What the 0.32.0 pass actually checked (2026-09-05).** The tray — on
+**KDE Plasma Wayland** and **Cinnamon X11** in the matrix guest, and on
+**Hyprland/Wayland** on the development laptop, against a build made in
+each place. The indicator is PolterType's own on Linux from this
+release, so the pass is about the tray and nothing else.
+
+The tooltip end to end, where the library allows one at all: with
+libayatana-appindicator 0.6.0 on the loader path, hovering the icon in
+Plasma drew **"PolterType — en-US"** beside the highlighted badge —
+photographed with KDE's own grabber, because the VirtualBox framebuffer
+composites a click but not a tooltip surface, and both the icon's
+tooltip and the panel clock's were invisible to it. Against Ubuntu's
+own 0.5.94 the same run drew nothing and logged the missing symbol,
+which is the honest state of the AppImage today; see the Linux bullet
+under "Loose ends".
+
+The menu underneath was re-measured on both guest sessions, since it
+now reaches the panel through an indicator we create: `tray-probe.py`
+walked the missed-word submenu off the item's own dbusmenu — empty
+state, an offer deferred, the word present afterwards — with no errors,
+on Plasma Wayland against each library version and on Cinnamon X11.
+
+The item's own properties were read back off D-Bus in all three
+sessions: id `poltertype`, title `PolterType`, an icon path that
+changes on every redraw, and a `ToolTip` carrying the same sentence the
+other two platforms have shown all along — the property that was empty
+in every release before this one.
+
+What this pass did **not** check: everything else. Windows and macOS
+never ran this build, and their tray is still `tray-icon`'s, untouched
+by any of it. No bullet below was re-measured — read them as the 0.31.0
+and 0.30.0 passes left them.
+
+**What the 0.31.0 pass actually checked (2026-09-04).** The interface
+language, on **Hyprland/Wayland** on the development laptop, against a
+debug build in a config directory of its own. Picking French in
+Settings redrew the whole window with no save and no reopening; after
+Save, the tray menu — read back entry by entry from the same dbusmenu
+a panel draws — had gone from Ukrainian to French in the process that
+was already running, down to the submenu's empty row. The four shipped
+catalogs were checked mechanically as well: 249 keys each, none
+missing, extra or empty, and every `{}` count matching the English at
+the call site.
+
+What this pass did **not** check: everything else. No bullet below was
+re-measured — read them as the 0.30.0 pass left them — and no other
+desktop, no Windows and no macOS ran this build at all. The relabel
+reaches them through `tray-icon`'s own `set_text`, the same call the
+pause entry has used on every platform all along, so elsewhere it is
+reasoned rather than measured.
+
+**What the 0.30.0 pass actually checked (2026-09-02).** Three reports
+that all name the same session, so the pass was run on that session:
+**Cinnamon X11**, in the matrix guest, against the built binary.
+
+Selection conversion (#51) end to end, with the **default**
+`Ctrl+Shift+Backspace` rather than a modifier-only stand-in — which
+matters, because on X11 that is a real `XGrabKey` and the grab is half
+of what was broken. Two words of wrong-layout text in a Pluma
+document, selected, the hotkey pressed: the document came back
+converted, the log said `selection converted from=en-US to=ru-RU`, and
+the marker that was on the clipboard beforehand was there again
+afterwards — read while the app was still running, since an
+owner-served clipboard empties when its owner dies and reading after
+the teardown measures the teardown.
+
+The manual hotkey after a caret move (#56, #57), in the same session,
+each phase measured against a reference line: an arrow key then a
+word, and a pointer button then a word, both converted the word that
+followed, and the log carried no refusal at all.
+
+What this pass did **not** check: every other session. The two engine
+fixes are session-independent in a way the clipboard is not — they are
+about what the buffer does with a nav key or a click, and both
+triggers arrive through the listener, which is per-session code. Read
+them as measured on X11 and reasoned elsewhere. The macOS half of this
+release (#42, #55) was measured by its contributor on an M1 Pro and by
+nobody here; there is still no Mac on this team.
 
 **What the 0.29.0 pass actually checked (2026-08-30).** Two reports,
 one of them a photograph — so the check is a photograph too, taken on
@@ -138,6 +483,21 @@ And the way back was measured too, because with the icon hidden there is
 no menu to undo it from: an app started `hidden` and then pointed at
 `tray_icon = "color"` by an edit to `config.toml` went Active and
 reappeared in the panel without being restarted.
+
+**`flag` was checked as pixels, not in a panel.** It adds a fourth
+value and no new mechanism — the same `set_icon` with the same 64×64
+RGBA buffer the two rows above were measured through — so what was
+verified is the drawing: every flag in the table rendered, box-filtered
+down to the 16 pixels a panel shows, and read on a dark and a light
+panel colour. No session in the guest has been photographed wearing
+one. Two honest limits inside that: **thirty-nine countries have a
+drawing** and everything else — including every layout id Windows and
+macOS cannot resolve to a locale — falls back to the lettered `color`
+badge; and the flags that *are* drawn are simplifications, so the
+United States has twenty stars and Portugal's armillary sphere is three
+rings. Countries whose flags differ only by an emblem this size cannot
+carry (Slovakia, Slovenia, Serbia, Croatia, Mexico) are left to the
+letters on purpose.
 
 **`hidden` is a request, not a guarantee, and only Cinnamon has
 answered it.** `Passive` is what the StatusNotifier spec offers, and a
@@ -471,6 +831,12 @@ has exercised the `SendInput` path on a Windows machine. macOS is not
 a gap here for once: it has no `send_chord` at all, so the toggle
 reports itself unavailable rather than half-working.
 
+> **macOS has a `send_chord` since v0.30.0** and the toggle is offered
+> there — so the sentence above is history, not the current state. It
+> posts the chord as `Cmd`-flagged key events and was measured by the
+> contributor on an M1 Pro (#55); nobody on this team has a Mac to
+> confirm it independently.
+
 > **Windows is no longer unrun** (reported on #32, 2026-08-30, against
 > 0.28.0 on Windows Server 2025). A selection typed in the wrong layout
 > converts, the `SendInput` copy and paste chords land, and the
@@ -483,6 +849,32 @@ reports itself unavailable rather than half-working.
 > by an unelevated user at all** (`DisableMsi` defaults to 1, msiexec
 > answers 1625), so "no admin rights needed" holds for Windows 10/11
 > and not for Server.
+
+> **And the Linux half of that pass was resting on Klipper** (measured
+> 2026-09-02, from #51 on Cinnamon X11). X11 and Wayland both serve the
+> clipboard from the process that owns it, and `arboard` tears its
+> serving window down with the last handle — so the writes this feature
+> makes were destroyed the moment `set_text` returned. A marker written
+> through a dropped handle and read back through a fresh one is gone on
+> a nested X server, on XWayland and on Hyprland's data-control, and
+> survives on all three when the handle is kept. The KDE Plasma run
+> above passed because KDE ships a clipboard manager that adopts an
+> orphaned selection; Cinnamon and the bare sessions ship none, and
+> there the converted text was never on the clipboard when the paste
+> asked for it — and the restore wiped the user's own clipboard instead
+> of putting it back. The writing handle is now held for the life of
+> the process. Windows was never affected: its clipboard is owned by
+> the OS rather than served by the writer, which is why the report
+> above could pass there.
+>
+> The same issue carried a second fault, and it is the one that reaches
+> **every X11 session**: the copy chord was pressed while the hotkey
+> that asked for it was still held, where a passive `XGrabKey` is an
+> *active* grab and everything emitted goes to the client holding it.
+> Every other force-switch path already waited for the key to come up;
+> this one now does too. Both fixes were then run end to end on
+> Cinnamon X11 for the 0.30.0 pass above, under the default grabbed
+> chord — converted document, restored clipboard.
 
 **What the 0.23.0 pass actually checked (2026-08-27).** One machine —
 this Hyprland laptop — and the Settings window, because the release
@@ -1135,6 +1527,16 @@ move too fast to be true.
   only what the compositor hands it and only mutter does (see
   `DECISIONS.md`, 2026-08-01). AT-SPI *is* used for the caret and the
   focused application, which is a different interface entirely.
+- **A plug-in's tray entries keep the language PolterType started
+  in.** The interface itself changes language while it runs — the
+  window as you pick it, the tray menu once the settings are saved —
+  and a plug-in's *settings pane* follows, because its manifest is
+  re-read. Its **tray** entries do not: those are built from that
+  manifest when the plug-in is discovered, so they take the new
+  language at PolterType's next start — and neither does a plug-in
+  **service**, started once and keeping the `POLTERTYPE_LOCALE` it was
+  handed then. A command run on demand is spawned per call and gets
+  the current one.
 - **The onboarding walkthrough exists since 0.7.0, and has never run
   on macOS.** The tray alert opens the Settings window on its **Setup**
   pane (`poltertype --setup`), which probes the live machine via
@@ -1281,6 +1683,26 @@ move too fast to be true.
   `docs/DECISIONS.md` and the 0.6.2 changelog entry.
 
 ## Loose ends, per platform
+
+- **Linux: the tray icon's tooltip needs libayatana-appindicator
+  0.6.0, which the AppImage now carries and most distributions still
+  do not.** The tooltip API is a 0.6.0 addition; Debian 13, Debian sid
+  and every current Ubuntu ship 0.5.9x, where those functions do not
+  exist at all. PolterType looks the symbol up once at startup, misses
+  it and does without — so **installed from a distribution package on
+  those systems, the icon has no hover text**, exactly as in every
+  release before 0.32.0.
+
+  The AppImage used to be on the wrong side of this as well, since it
+  bundles the copy from the machine that built it and that copy wins
+  over whatever the user has installed. From **0.35.0** it builds
+  0.6.0 from source and bundles that instead, and fails the build
+  rather than shipping one without it (issue #59). Verified on Ubuntu
+  with 0.5.94 installed: the same binary logs "no tooltip API" against
+  the system library and publishes a `ToolTip` property against the
+  built one. Not yet verified by installing a released AppImage on
+  Debian 13 — that reading belongs to the reporter or to the next
+  pass.
 
 - **macOS: what 0.7.0 changed in the input path has still never been
   exercised.** 0.6.2 was runtime-tuned on real hardware (macOS 15,

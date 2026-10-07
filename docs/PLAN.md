@@ -1,7 +1,7 @@
 # PolterType — Project Plan
 
 > A living roadmap. Updated as implementation proceeds.
-> Created: 2026-05-02. Last updated: 2026-08-30 (v0.29.0).
+> Created: 2026-05-02. Last updated: 2026-09-08 (v0.34.1).
 
 > **How to read this document.** This is a **plan**, not a description
 > of the implementation: wherever the code has diverged from the
@@ -108,7 +108,7 @@ integration).
 | Crate | Purpose |
 |---|---|
 | `iced` 0.13+ | settings window UI |
-| `tray-icon` | system tray (Win/Mac/Linux) |
+| `tray-icon` | system tray on Windows and macOS, and the menu type on all three. The Linux indicator is built directly since 0.32.0, because that backend's tooltip is an empty function — `DECISIONS.md`, 2026-09-05 |
 | `global-hotkey` | global hotkeys |
 | ~~`auto-launch`~~ | run at login — **dropped in 0.6.2**. It sat in the manifest unused for the project's whole life while the Settings checkbox quietly did nothing. Replaced by `poltertype-autostart`, which drives each platform's own mechanism directly (LaunchAgent / run key / systemd user unit, with an XDG entry where there is no user manager) and needs no dependency at all. |
 | `single-instance` | forbid a second process |
@@ -342,12 +342,18 @@ autostart = true           # honoured on all three platforms since
                            # fallback — see DECISIONS, 2026-08-21)
 sound_on_correct = true
 show_notifications = false
-ui_language = "system"     # or "en", "uk"
+ui_language = "system"     # "system" reads the environment; "en" is
+                           # compiled in; "de", "es", "fr" and "uk"
+                           # ship as catalogs, and any language code
+                           # with a catalog on disk works — see
+                           # docs/TRANSLATING_THE_UI.md
 ui_theme = "system"        # Settings window theme: "system", "light", "dark"
 tray_icon = "color"        # tray icon: "color" (a hue per layout),
-                           # "mono" (one neutral badge), "hidden" (no
-                           # icon and no tray menu — the window still
-                           # opens with `poltertype --settings`)
+                           # "mono" (one neutral badge), "flag" (the
+                           # layout's country, falling back to "color"
+                           # for a country with no drawing), "hidden"
+                           # (no icon and no tray menu — the window
+                           # still opens with `poltertype --settings`)
 log_level = "info"
 paused = false             # auto-switch off — the General pane's
                            # "Manual only". Written by the app itself
@@ -365,6 +371,24 @@ ignore_in_password_fields = true
 idle_timeout_ms = 2000
 suppress_in_identifiers = true   # skip snake_case / camelCase / letter+digit
 suppress_for_all_caps = true     # skip URL, HTTP, API, ССЫЛКА…
+hold_keys = false                # hold keystrokes back during a
+                                 # correction — Windows and macOS; costs
+                                 # a small delay, so it is off by
+                                 # default there. Not read on Linux,
+                                 # where the gate is on unless
+                                 # `POLTERTYPE_HOLD_KEYS=0`; the variable
+                                 # overrides everywhere; read at startup
+replay_speed = "normal"          # "normal" | "fast" | "instant" — how
+                                 # much of a correction's measured
+                                 # waiting to keep: the emitter's
+                                 # inter-key pacing (Linux only in
+                                 # effect) and the engine's settles
+                                 # around the layout switch, which
+                                 # scale by a gentler rule that never
+                                 # reaches zero. Normal is what input
+                                 # remappers (keyd) need; faster risks
+                                 # dropped keystrokes on such a stack.
+                                 # Applies to the next correction
 
 [exceptions]
 # EMPTY by default, deliberately — see DECISIONS.md, "Reversed: no
@@ -419,6 +443,7 @@ enabled              = true
 max_suggestions      = 5            # clamped to 1..=9 (one digit key each)
 tooltip_timeout_secs = 30           # clamped to 3..=600 at read time
 accept_modifiers     = "Ctrl+Shift" # + digit 1..9; "" disables keyboard accept
+caret_anchor         = true         # Linux: ask the a11y bus where the caret is
 
 # Converting a *selected* passage with the force-switch key, rather
 # than the last word — added 2026-08-28 (v0.24.0), issue #32. OFF by
@@ -434,6 +459,10 @@ enabled = false
 [updates]
 enabled              = true
 check_interval_hours = 24   # floor of 1 is enforced in code; 0 means hourly, NOT off
+local_signing_identity = ""  # macOS only: a self-signed identity to
+                             # re-sign an update with, so the OS keeps
+                             # the permissions granted to the old copy.
+                             # Empty = ad-hoc, as before
 
 [ai]
 enabled      = false
@@ -653,7 +682,7 @@ engine only *pulls* focus state at word boundaries.
 
 ## 4. Repository structure
 
-The actual structure as of v0.2.0 (the original sketch diverged from
+The actual structure as of v0.34.1 (the original sketch diverged from
 it in several places: `assets/` and a root `tests/` do not exist,
 modules are split into "one entity — one file" directories, and
 `CONTRIBUTING.md` lives at the root, not in `docs/`):
@@ -661,15 +690,20 @@ modules are split into "one entity — one file" directories, and
 ```
 poltertype/
 ├── .cargo/config.toml           # the `cargo xtask` alias
-├── .github/workflows/{ci.yml,release.yml}
+├── .github/workflows/{ci.yml,release.yml,site.yml}
 ├── .githooks/                   # pre-commit / pre-push (installed by xtask)
 ├── docs/
 │   ├── PLAN.md                  # this file
+│   ├── ARCHITECTURE.md          # why each piece is shaped as it is
 │   ├── DECISIONS.md             # architecture decision log
+│   ├── KNOWN-GAPS.md            # what does not work despite looking like it does
 │   ├── DATA_LAYOUT.md           # the on-disk data tree + plugins
 │   ├── PERMISSIONS.md           # macOS Accessibility, Linux evdev/X11
+│   ├── MACOS_POPUP.md           # the AX caret and what it lies about
+│   ├── CODE_SIGNING.md          # published signing policy
 │   ├── AI.md                    # state and design of the AI subsystem
 │   ├── ADDING_A_LANGUAGE.md
+│   ├── TRANSLATING_THE_UI.md    # catalogs, plug-in strings, translated guides
 │   └── RELEASING.md
 ├── crates/
 │   ├── poltertype-app/          # binary: tray, Settings UI (separate process)
@@ -687,16 +721,30 @@ poltertype/
 │   ├── poltertype-update/       # GitHub-Releases updater (v0.4.0+); the
 │   │   │                        # only network code in a stock source build
 │   │   └── src/{check.rs, manifest.rs, download.rs, staging.rs, version.rs, apply/}
+│   ├── poltertype-popup/        # the suggestion tooltip; steals no focus
+│   │   └── src/{factory.rs, place.rs, render.rs, renderer.rs, linux/, macos/, windows/, noop.rs}
+│   ├── poltertype-tray/         # the tray itself since 0.32.0 (libayatana direct on Linux)
+│   │   └── src/{icon.rs, indicator.rs, linux.rs, upstream.rs, noop.rs}
+│   ├── poltertype-shell/        # per-OS app-shell quirks: instance lock, dock,
+│   │   │                        # .desktop entry, keycap glyphs, UI font
+│   │   └── src/{desktop/, dock/, font/, instance/, keys/, lifecycle/, notify/, process/}
+│   ├── poltertype-autostart/    # run at login; no per-OS dependency
+│   │   └── src/{linux.rs, macos.rs, windows.rs, noop.rs}
+│   ├── poltertype-icon/         # the brand mark as geometry — RGBA, PNG, .ico
+│   │   └── src/{render.rs, shapes.rs, ico/}
 │   ├── poltertype-ai/           # feature `ai`; real LlmDetector since 0.10.0,
 │   │   │                        # compiled into the installers since 0.12.0
 │   │   └── src/{factory.rs, detector.rs, wire.rs, transport.rs, locality.rs, cache.rs, keys.rs, ...}
 │   └── poltertype-types/        # shared types (LayoutId, KeyEvent, ...)
 ├── data/                        # source of truth, consumed by build.rs
 │   ├── layout-mappings/         # TOML overlays (en_us.toml, uk_ua.toml, ...)
+│   ├── i18n/                    # UI catalogs (de, es, fr, uk); English at the call sites
 │   └── wordlists/               # <stem>.txt.gz + -extras/-stop/-weak
 ├── installers/{wix,windows,macos,linux}/
+├── packaging/                   # AUR / winget / Homebrew manifests + bump.sh
 ├── scripts/setup-linux.sh
-├── xtask/                       # wordlists fetch, hooks install, icon, version
+├── xtask/                       # wordlists fetch, hooks install, icon, version,
+│                                # manifest sign/verify, style gate
 ├── Cargo.toml                   # workspace
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
@@ -710,8 +758,12 @@ section on file organization).
 
 A workspace of several crates gives us:
 
-- Clean isolation of OS code behind `#[cfg(...)]`, confined to
-  `poltertype-input` / `poltertype-layout`.
+- Clean isolation of OS code behind `#[cfg(...)]`, confined to seven
+  crates — `poltertype-input`, `-layout`, `-update`, `-popup`,
+  `-tray`, `-autostart` and `-shell`. `poltertype-app` and
+  `poltertype-core` hold **zero**, which is why a one-function GTK
+  quirk got a crate of its own rather than a `#[cfg]` in `main.rs`.
+  `cargo xtask style` enforces this rather than trusting it.
 - The AI crate behind `feature = "ai"` — not compiled by default.
 - The option to extract `poltertype-detect` as a standalone library if
   third-party use ever comes up.
@@ -815,8 +867,14 @@ Levels:
 
 1. **UI framework:** `iced` (pure Rust). Fallback — `egui`.
 2. **Bundle ID:** `dev.opensource.poltertype`.
-3. **UI languages v0.1:** EN + UK; the architecture is multilingual
-   (i18n via `fluent-rs` or `rust-i18n`, `.ftl` files in `assets/i18n/`).
+3. **UI languages:** English lives at the call sites, compiled in, so
+   a missing catalog degrades to readable English rather than a blank
+   button; German, Spanish, French and Ukrainian ship as catalogs.
+   Neither `fluent-rs` nor `rust-i18n` and no `.ftl` — a flat TOML
+   table per language under `data/i18n/`, read at run time, so adding
+   a language is a file rather than a rebuild, and a guide the window
+   links to can be translated the same way. See
+   [TRANSLATING_THE_UI.md](TRANSLATING_THE_UI.md).
 4. **Sounds v0.1:** CC0 placeholders; theme format — folders.
 5. **Default log level:** `info`.
 6. **v0.1 release channel:** GitHub Releases only.
@@ -825,7 +883,7 @@ Levels:
 
 ## 10. Roadmap
 
-> **Status as of v0.24.0 (2026-08-28).** Phases 0–8 are, in their core
+> **Status as of v0.34.1 (2026-09-08).** Phases 0–8 are, in their core
 > parts, complete and shipped; `CHANGELOG.md` is the release-by-release
 > record and does not need repeating here. Items that are **not** done
 > are deliberately left as

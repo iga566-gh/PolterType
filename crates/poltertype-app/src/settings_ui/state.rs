@@ -6,13 +6,13 @@ use std::sync::Arc;
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor;
 use iced::{Subscription, Theme};
-use poltertype_core::engine::ModSet;
 use poltertype_core::settings::{Settings, SettingsStore};
 use poltertype_layout::LayoutId;
 
 use super::enums::*;
 use super::helpers::*;
 use super::theme;
+pub use super::types::{ModCapture, SaveBanner};
 
 pub struct SettingsApp {
     pub(super) settings: Settings,
@@ -72,6 +72,12 @@ pub struct SettingsApp {
     /// per frame would fight whoever else writes them.
     pub(super) plugins: Vec<super::plugin_pane::PluginPane>,
 
+    /// Languages the interface can actually be shown in — every locale
+    /// a catalog exists for, plug-ins' and the user's own included.
+    /// Read from disk once: the picker must offer what the loader would
+    /// read, and neither list changes while the window is open.
+    pub(super) ui_languages: Vec<(String, String)>,
+
     // ── Commands pane: draft of a new command ──────────────────────
     /// Free-form display name. Falls back to id if blank at Add time.
     pub(super) command_draft_name: String,
@@ -114,27 +120,6 @@ pub struct SettingsApp {
     pub(super) wordlist_dirty: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct SaveBanner {
-    pub(super) text: String,
-    pub(super) is_error: bool,
-}
-
-/// Capture state for a modifier-only chord (issue #32), mirroring what
-/// the engine's matcher does with the live key stream.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ModCapture {
-    /// Modifier keys down right now.
-    pub(super) down: ModSet,
-    /// Every modifier seen during this hold — the gesture is judged on
-    /// what was held together, not on what is left at the last release.
-    pub(super) peak: ModSet,
-    /// A single-modifier tap that has landed and is waiting to see
-    /// whether a second one follows. One modifier alone is never a
-    /// binding, so nothing is committed until it does.
-    pub(super) pending_tap: Option<ModSet>,
-}
-
 impl SettingsApp {
     pub(super) fn new(
         settings: Settings,
@@ -164,13 +149,15 @@ impl SettingsApp {
             .map(std::path::Path::to_path_buf)
             .unwrap_or_default();
 
+        let setup =
+            poltertype_input::setup::probe_setup(&store.snapshot().updates.local_signing_identity);
         Self {
             settings,
             os_layouts,
             config_path,
             store,
             pane: initial_pane,
-            setup: poltertype_input::setup::probe_setup(),
+            setup,
             layout_backend,
             setup_status: None,
             system_prefers_dark: super::system_theme::system_prefers_dark(),
@@ -188,6 +175,13 @@ impl SettingsApp {
                     &plugin_config_root,
                 )
             },
+            ui_languages: {
+                let data_dir = poltertype_core::resolve_data_dir().unwrap_or_default();
+                let plugins = poltertype_core::plugins::catalog_sources(&data_dir);
+                poltertype_core::i18n::installed_locales(&poltertype_core::i18n::sources(
+                    &data_dir, &plugins,
+                ))
+            },
             command_draft_name: String::new(),
             command_draft_trigger: String::new(),
             command_draft_action_kind: CommandActionKind::TypeText,
@@ -204,7 +198,11 @@ impl SettingsApp {
     }
 
     pub(super) fn title(&self) -> String {
-        format!("PolterType · Settings ({})", self.config_path.display())
+        poltertype_core::i18n::tr_args(
+            "ui.window_title",
+            "PolterType · Settings ({})",
+            &[&self.config_path.display().to_string()],
+        )
     }
 
     /// The user's theme preference, parsed fresh from the staged
