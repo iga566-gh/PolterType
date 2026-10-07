@@ -59,7 +59,15 @@ impl SwitcherEngine {
                     self.track_keys_down(&ev);
                     self.click_grace_tick(&ev);
                     self.check_keystream_hotkeys(&ev, &mut buffer, &key_rx);
-                    if last_event_at.elapsed() > idle_timeout {
+                    // The chord's own keys neither sweep nor count as
+                    // typing — see `spares_idle_sweep`. A switch by hand
+                    // does count: it just placed the caret, and a word
+                    // it switched mid-flight must not be swept by the
+                    // next letter as if the pause before it still stood.
+                    let spared = self.spares_idle_sweep(&ev);
+                    let quiet_since = (*self.last_force_switch.read())
+                        .map_or(last_event_at, |t| t.max(last_event_at));
+                    if !spared && quiet_since.elapsed() > idle_timeout {
                         // A live offer overrides idle hygiene while no
                         // word is mid-flight: pausing to read the
                         // tooltip is the expected interaction, and
@@ -92,7 +100,9 @@ impl SwitcherEngine {
                             self.dismiss_suggestions(None);
                         }
                     }
-                    last_event_at = Instant::now();
+                    if !spared {
+                        last_event_at = Instant::now();
+                    }
                     self.handle_key(ev, &mut buffer, &key_rx);
 
                     // Drain pending commands so hotkeys stay snappy

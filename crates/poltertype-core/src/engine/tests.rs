@@ -2418,6 +2418,116 @@ mod engine_integration_tests {
         );
     }
 
+    /// `F12`, the key of the chord the two tests below grab.
+    const F12: u32 = 0x58;
+
+    /// The other half of the same pause: a word still being typed.
+    ///
+    /// Idle hygiene ran on the chord's own `Ctrl` press and abandoned
+    /// the word under the caret, so the hotkey found neither it nor a
+    /// stash and did nothing — every press a person makes after
+    /// stopping to look at the word. Measured on Windows, 2026-10-07:
+    /// every refused press in a month of logs followed an idle abandon
+    /// by under a second.
+    #[test]
+    fn the_hotkey_after_a_pause_switches_the_word_still_being_typed() {
+        let h = Harness::start(50); // 50 ms idle timeout
+        grab_default_switch_chord(&h, F12);
+        type_word(&h, &GHBDSN);
+        h.settle();
+
+        std::thread::sleep(Duration::from_millis(120));
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        assert_eq!(
+            erase_counts(&h).last(),
+            Some(&GHBDSN.len()),
+            "the word under the caret, after a pause: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// …and with a word before it still stashed, the abandon handed the
+    /// hotkey that one instead: its backspaces ate the word being typed
+    /// — or the selection standing in its place — and the previous word
+    /// was typed over it.
+    #[test]
+    fn the_hotkey_after_a_pause_does_not_reach_back_past_the_word_being_typed() {
+        let h = Harness::start(50); // 50 ms idle timeout
+        grab_default_switch_chord(&h, F12);
+        type_word(&h, &GHBDSN);
+        h.tap(SPACE);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        type_word(&h, &GHBDSN);
+        h.settle();
+        let before = erase_counts(&h).len();
+
+        std::thread::sleep(Duration::from_millis(120));
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        assert_eq!(
+            erase_counts(&h)[before..],
+            [GHBDSN.len()],
+            "the word under the caret, not the one before it: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// A switch by hand counts as activity. The chord's keys do not
+    /// reset the idle clock, so without that the first letter typed
+    /// after switching an unfinished word found the pause still
+    /// standing, swept the word it had just placed, and left the next
+    /// press nothing it would touch.
+    #[test]
+    fn typing_on_after_switching_after_a_pause_keeps_the_word() {
+        let h = Harness::start(3_000); // longer than `settle` stays quiet
+        grab_default_switch_chord(&h, F12);
+        type_word(&h, &GHBDSN);
+        h.settle();
+
+        std::thread::sleep(Duration::from_millis(3_200));
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        h.tap(GHBDSN[0]);
+        h.settle();
+
+        press_grabbed_switch_chord(&h, F12);
+        h.wait_for(|e| matches!(e, SwitcherEvent::Corrected { .. }));
+        h.settle();
+        assert_eq!(
+            erase_counts(&h).last(),
+            Some(&(GHBDSN.len() + 1)),
+            "the switched word and the letter typed onto it: {:?}",
+            h.emitter.ops()
+        );
+    }
+
+    /// The fence for the two above. A bare modifier after a pause does
+    /// not run idle hygiene, but it does not stand in for typing either:
+    /// the next real key still finds the pause and abandons the word, so
+    /// a click the listener never saw cannot splice what follows onto it.
+    #[test]
+    fn a_bare_modifier_after_a_pause_does_not_keep_the_word_alive() {
+        let h = Harness::start(50); // 50 ms idle timeout
+        type_word(&h, &GHBDSN[..3]);
+        h.settle();
+        std::thread::sleep(Duration::from_millis(120));
+        h.tap(0x2A); // Shift, as for a capital letter
+        type_word(&h, &GHBDSN[3..]);
+        h.tap(SPACE);
+        h.settle();
+        let (ops, _) = h.stop();
+        assert_eq!(
+            ops,
+            vec![],
+            "the word interrupted by the pause must still not be corrected"
+        );
+    }
+
     /// A chord whose key also closes words must keep working.
     ///
     /// The default pause chord is `Ctrl+Shift+Space`, and Space is what
@@ -3033,9 +3143,12 @@ mod engine_integration_tests {
     fn a_poisoned_buffer_is_left_alone_by_the_hotkey() {
         let h = Harness::start(50);
         type_word(&h, &GHBDSN);
-        // The idle sweep abandons the word in flight, which poisons.
+        // The idle sweep abandons the word in flight, which poisons —
+        // on the next key that is typing. The chord's own modifier is
+        // not that key: see
+        // `the_hotkey_after_a_pause_switches_the_word_still_being_typed`.
         std::thread::sleep(Duration::from_millis(160));
-        h.tap(0x1D);
+        h.tap(GHBDSN[0]);
         h.settle();
 
         h.cmd_tx

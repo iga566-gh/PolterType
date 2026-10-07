@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::commands::{CommandAction, UserCommand};
 use crate::engine::buffer::WordBuffer;
 use crate::engine::enums::{Binding, EngineCommand};
-use crate::engine::heuristics::match_binding;
+use crate::engine::heuristics::{match_binding, modifier_role};
 use crate::engine::types::BindingState;
 
 use super::engine::SwitcherEngine;
@@ -114,6 +114,19 @@ impl SwitcherEngine {
             }
             _ => {}
         }
+    }
+
+    /// Does this key leave idle hygiene to the next one?
+    ///
+    /// A bare modifier, and any key of a hotkey chord. After a pause
+    /// the first of them is the chord the user reaches for *because*
+    /// they stopped to look at the word, and sweeping on it abandoned
+    /// that very word before the chord could reach it. Neither moves
+    /// the caret, so nothing is lost by waiting: the run loop does not
+    /// count them as typing either, and the next real key still finds
+    /// the pause.
+    pub(super) fn spares_idle_sweep(&self, ev: &KeyEvent) -> bool {
+        modifier_role(ev.scancode).is_some() || self.is_own_hotkey_press(ev)
     }
 
     /// Narrower: is this the *force-switch* chord's own key?
