@@ -38,7 +38,7 @@ pub(super) fn modifiers_for_event(vk: u32, direction: KeyDirection) -> Modifiers
 /// delivered has taken effect: a Ctrl release still reads "Ctrl held".
 /// [`modifiers_for_event`] is what corrects for that; this alone is
 /// only right for keys the event is not about.
-fn read_modifiers() -> Modifiers {
+pub(super) fn read_modifiers() -> Modifiers {
     // The low bit of `GetKeyState` is the toggle, not the held-ness —
     // the only thing that answers "is Caps Lock on" without guessing.
     // Safety: GetKeyState is a trivial Win32 call.
